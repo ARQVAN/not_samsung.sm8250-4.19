@@ -17,9 +17,9 @@
 #include <asm/neon.h>
 #include <asm/cputype.h>
 
-static inline int lz4_decompress_accel_enable(void)
+static inline int lz4p_decompress_accel_enable(void)
 {
-	return may_use_simd();
+	return may_use_simd(); 
 }
 
 int LZ4P_decompress_safe(const char *source, char *dest,
