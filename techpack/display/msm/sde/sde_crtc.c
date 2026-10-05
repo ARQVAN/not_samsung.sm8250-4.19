@@ -4968,7 +4968,7 @@ bool sde_crtc_is_fod_enabled(struct drm_crtc_state *state)
 {
 	struct sde_crtc_state *cstate = to_sde_crtc_state(state);
 
-	return cstate->fod_dim_alpha != 0;
+	return cstate->fod_enabled;
 }
 
 static void
@@ -4983,6 +4983,7 @@ sde_crtc_fod_atomic_check(struct sde_crtc_state *cstate,
 			break;
 
 	fod_plane_idx = plane_idx;
+	cstate->fod_enabled = fod_plane_idx != cnt;
 
 	if (fod_plane_idx != cnt) {
 		struct dsi_display *display = get_main_display();
@@ -4992,11 +4993,8 @@ sde_crtc_fod_atomic_check(struct sde_crtc_state *cstate,
 	cstate->fod_dim_alpha = alpha;
 
 	for (plane_idx = 0; plane_idx < cnt; plane_idx++) {
-		if (plane_idx == fod_plane_idx)
-			continue;
-
 		sde_plane_set_fod_dim_alpha(pstates[plane_idx].sde_pstate,
-					    alpha);
+				plane_idx == fod_plane_idx ? 0 : alpha);
 	}
 }
 
