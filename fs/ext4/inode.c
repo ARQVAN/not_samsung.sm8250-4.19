@@ -3481,6 +3481,46 @@ static bool ext4_inode_datasync_dirty(struct inode *inode)
 	return inode->i_state & I_DIRTY_DATASYNC;
 }
 
+static int ext4_set_iomap(struct inode *inode, struct iomap *iomap,
+                          struct ext4_map_blocks *map, loff_t offset,
+                          loff_t length, int map_ret)
+{
+        unsigned int blkbits = inode->i_blkbits;
+
+        /*
+         * Writes spanning EOF may update file size on completion.
+         * Account for that when deciding whether the mapping is dirty.
+         */
+        iomap->flags = 0;
+        if (ext4_inode_datasync_dirty(inode) ||
+            offset + length > i_size_read(inode))
+                iomap->flags |= IOMAP_F_DIRTY;
+
+        if (map->m_flags & EXT4_MAP_NEW)
+                iomap->flags |= IOMAP_F_NEW;
+
+        iomap->bdev = inode->i_sb->s_bdev;
+        iomap->dax_dev = EXT4_SB(inode->i_sb)->s_daxdev;
+        iomap->offset = (u64)map->m_lblk << blkbits;
+        iomap->length = (u64)map->m_len << blkbits;
+
+        if (!map_ret) {
+                iomap->type = IOMAP_HOLE;
+                iomap->addr = IOMAP_NULL_ADDR;
+        } else if (map->m_flags & EXT4_MAP_UNWRITTEN) {
+                iomap->type = IOMAP_UNWRITTEN;
+                iomap->addr = (u64)map->m_pblk << blkbits;
+        } else if (map->m_flags & EXT4_MAP_MAPPED) {
+                iomap->type = IOMAP_MAPPED;
+                iomap->addr = (u64)map->m_pblk << blkbits;
+        } else {
+                WARN_ON_ONCE(1);
+                return -EIO;
+        }
+
+        return 0;
+}
+
 static int ext4_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
 			    unsigned flags, struct iomap *iomap)
 {
@@ -3609,43 +3649,12 @@ retry:
 			return ret;
 	}
 out:
-	/*
-	 * Writes that span EOF might trigger an I/O size update on completion,
-	 * so consider them to be dirty for the purposes of O_DSYNC, even if
-	 * there is no other metadata changes being made or are pending here.
-	 */
-	iomap->flags = 0;
-	if (ext4_inode_datasync_dirty(inode) ||
-	    offset + length > i_size_read(inode))
-		iomap->flags |= IOMAP_F_DIRTY;
-	iomap->bdev = inode->i_sb->s_bdev;
-	iomap->dax_dev = sbi->s_daxdev;
-	iomap->offset = (u64)first_block << blkbits;
-	iomap->length = (u64)map.m_len << blkbits;
-
-	if (ret == 0) {
-		iomap->type = delalloc ? IOMAP_DELALLOC : IOMAP_HOLE;
-		iomap->addr = IOMAP_NULL_ADDR;
-	} else {
-		/*
-		 * DIO mapping may set both EXT4_MAP_MAPPED and
-		 * EXT4_MAP_UNWRITTEN. Unwritten extents must take priority.
-		 */
-		if (map.m_flags & EXT4_MAP_UNWRITTEN) {
-			iomap->type = IOMAP_UNWRITTEN;
-		} else if (map.m_flags & EXT4_MAP_MAPPED) {
-			iomap->type = IOMAP_MAPPED;
-		} else {
-			WARN_ON_ONCE(1);
-			return -EIO;
-		}
-		iomap->addr = (u64)map.m_pblk << blkbits;
-	}
-
-	if (map.m_flags & EXT4_MAP_NEW)
-		iomap->flags |= IOMAP_F_NEW;
-
-	return 0;
+        ret = ext4_set_iomap(inode, iomap, &map, offset, length, ret);
+        if (ret < 0)
+                return ret;
+        if (delalloc && iomap->type == IOMAP_HOLE)
+                iomap->type = IOMAP_DELALLOC;
+        return 0;
 }
 
 static int ext4_iomap_end(struct inode *inode, loff_t offset, loff_t length,
