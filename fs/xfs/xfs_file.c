@@ -387,6 +387,7 @@ static int
 xfs_dio_write_end_io(
 	struct kiocb		*iocb,
 	ssize_t			size,
+	int			error,
 	unsigned		flags)
 {
 	struct inode		*inode = file_inode(iocb->ki_filp);
@@ -399,8 +400,11 @@ xfs_dio_write_end_io(
 	if (XFS_FORCED_SHUTDOWN(ip->i_mount))
 		return -EIO;
 
+	if (error)
+		return error;
+
 	if (size <= 0)
-		return size;
+		return 0;
 
 	/*
 	 * Capture amount written on completion as we can't reliably account

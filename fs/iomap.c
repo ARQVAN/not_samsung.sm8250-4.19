@@ -1490,9 +1490,7 @@ static ssize_t iomap_dio_complete(struct iomap_dio *dio)
 	ssize_t ret;
 
 	if (dio->end_io) {
-		ret = dio->end_io(iocb,
-				dio->error ? dio->error : dio->size,
-				dio->flags);
+		ret = dio->end_io(iocb, dio->size, dio->error, dio->flags);
 	} else {
 		ret = dio->error;
 	}
