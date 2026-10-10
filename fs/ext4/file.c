@@ -34,6 +34,60 @@
 #include "xattr.h"
 #include "acl.h"
 
+/*
+ * Check whether iomap direct I/O can handle this inode.
+ * Unsupported cases must retain the buffered I/O fallback.
+ */
+static bool ext4_dio_supported(struct kiocb *iocb,
+                               struct iov_iter *iter)
+{
+        struct inode *inode = file_inode(iocb->ki_filp);
+
+        if (!fscrypt_dio_supported(iocb, iter))
+                return false;
+        if (fsverity_active(inode))
+                return false;
+        if (ext4_should_journal_data(inode))
+                return false;
+        if (ext4_has_inline_data(inode))
+                return false;
+
+        return true;
+}
+
+static ssize_t ext4_dio_read_iter(struct kiocb *iocb,
+                                  struct iov_iter *to)
+{
+        struct inode *inode = file_inode(iocb->ki_filp);
+        ssize_t ret;
+
+        if (iocb->ki_flags & IOCB_NOWAIT) {
+                if (!inode_trylock_shared(inode))
+                        return -EAGAIN;
+        } else {
+                inode_lock_shared(inode);
+        }
+
+        if (!ext4_dio_supported(iocb, to)) {
+                inode_unlock_shared(inode);
+
+                /*
+                 * Clear IOCB_DIRECT so generic_file_read_iter() does
+                 * not re-enter the direct I/O path.
+                 */
+                iocb->ki_flags &= ~IOCB_DIRECT;
+                return generic_file_read_iter(iocb, to);
+        }
+
+        ret = iomap_dio_rw(iocb, to, &ext4_iomap_ops, NULL,
+                           is_sync_kiocb(iocb));
+
+        inode_unlock_shared(inode);
+        file_accessed(iocb->ki_filp);
+
+        return ret;
+}
+
 #ifdef CONFIG_FS_DAX
 static ssize_t ext4_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
@@ -63,19 +117,35 @@ static ssize_t ext4_dax_read_iter(struct kiocb *iocb, struct iov_iter *to)
 }
 #endif
 
-static ssize_t ext4_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
+static ssize_t ext4_file_read_iter(struct kiocb *iocb,
+                                   struct iov_iter *to)
 {
-	if (unlikely(ext4_forced_shutdown(EXT4_SB(file_inode(iocb->ki_filp)->i_sb))))
-		return -EIO;
+        struct inode *inode = file_inode(iocb->ki_filp);
 
-	if (!iov_iter_count(to))
-		return 0; /* skip atime */
+        if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
+                return -EIO;
+
+        if (!iov_iter_count(to))
+                return 0; /* skip atime */
 
 #ifdef CONFIG_FS_DAX
-	if (IS_DAX(file_inode(iocb->ki_filp)))
-		return ext4_dax_read_iter(iocb, to);
+        if (IS_DAX(inode))
+                return ext4_dax_read_iter(iocb, to);
 #endif
-	return generic_file_read_iter(iocb, to);
+
+        if (iocb->ki_flags & IOCB_DIRECT) {
+#ifdef CONFIG_FS_HPB
+                /*
+                 * iomap_dio_rw() in this 4.19 tree cannot propagate
+                 * DIO_HPB_IO. Retain the legacy path for HPB inodes.
+                 */
+                if (ext4_test_inode_state(inode, EXT4_STATE_HPB))
+                        return generic_file_read_iter(iocb, to);
+#endif
+                return ext4_dio_read_iter(iocb, to);
+        }
+
+        return generic_file_read_iter(iocb, to);
 }
 
 /*
