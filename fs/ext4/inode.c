@@ -3526,7 +3526,6 @@ static int ext4_iomap_alloc(struct inode *inode,
                             unsigned int flags)
 {
         handle_t *handle;
-        u8 blkbits = inode->i_blkbits;
         int ret, dio_credits, retries = 0;
 
         /* Limit the mapping request for direct I/O. */
@@ -3548,22 +3547,6 @@ retry:
                     ext4_should_retry_alloc(inode->i_sb, &retries))
                         goto retry;
                 return ret;
-        }
-
-        /*
-         * Allocations beyond EOF must be recoverable if the system
-         * crashes before the file size is updated.
-         */
-        if (!(flags & IOMAP_FAULT) &&
-            map->m_lblk + map->m_len >
-            (i_size_read(inode) + (1 << blkbits) - 1) >> blkbits) {
-                int err;
-
-                err = ext4_orphan_add(handle, inode);
-                if (err < 0) {
-                        ext4_journal_stop(handle);
-                        return err;
-                }
         }
 
         ext4_journal_stop(handle);
