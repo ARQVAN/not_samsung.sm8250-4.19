@@ -33,6 +33,7 @@
 #include "ext4_jbd2.h"
 #include "xattr.h"
 #include "acl.h"
+#include "truncate.h"
 
 /*
  * Check whether iomap direct I/O can handle this inode.
@@ -254,10 +255,83 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 	return iov_iter_count(from);
 }
 
+static ssize_t ext4_handle_inode_extension(struct inode *inode,
+                                           loff_t offset,
+                                           ssize_t written, size_t count)
+{
+        handle_t *handle;
+        bool truncate = false;
+        u8 blkbits = inode->i_blkbits;
+        ext4_lblk_t written_blk, end_blk;
+
+        /*
+         * Delayed allocation writeback can extend i_disksize while the
+         * I/O is running. Allocations past EOF use zeroed/unwritten
+         * extents so failed writes cannot expose uninitialized data.
+         */
+        WARN_ON_ONCE(i_size_read(inode) < EXT4_I(inode)->i_disksize);
+
+        if (offset + count <= EXT4_I(inode)->i_disksize) {
+                /*
+                 * Writeback may have added the inode to the orphan list.
+                 * Remove it if this write does not extend i_disksize.
+                 */
+                if (!list_empty(&EXT4_I(inode)->i_orphan) &&
+                    inode->i_nlink) {
+                        handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
+                        if (IS_ERR(handle)) {
+                                ext4_orphan_del(NULL, inode);
+                                return PTR_ERR(handle);
+                        }
+
+                        ext4_orphan_del(handle, inode);
+                        ext4_journal_stop(handle);
+                }
+
+                return written;
+        }
+
+        if (written < 0)
+                goto truncate;
+
+        handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
+        if (IS_ERR(handle)) {
+                written = PTR_ERR(handle);
+                goto truncate;
+        }
+
+        if (ext4_update_inode_size(inode, offset + written))
+                ext4_mark_inode_dirty(handle, inode);
+
+        /*
+         * Truncate allocated blocks that were not written past EOF.
+         */
+        written_blk = ALIGN(offset + written, 1 << blkbits);
+        end_blk = ALIGN(offset + count, 1 << blkbits);
+        if (written_blk < end_blk && ext4_can_truncate(inode))
+                truncate = true;
+
+        if (!truncate && inode->i_nlink)
+                ext4_orphan_del(handle, inode);
+
+        ext4_journal_stop(handle);
+
+        if (truncate) {
+truncate:
+                ext4_truncate_failed_write(inode);
+                if (inode->i_nlink)
+                        ext4_orphan_del(NULL, inode);
+        }
+
+        return written;
+}
+
 #ifdef CONFIG_FS_DAX
 static ssize_t
 ext4_dax_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
+	size_t count;
+	loff_t offset;
 	struct inode *inode = file_inode(iocb->ki_filp);
 	ssize_t ret;
 
@@ -277,7 +351,10 @@ ext4_dax_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (ret)
 		goto out;
 
+	offset = iocb->ki_pos;
+	count = iov_iter_count(from);
 	ret = dax_iomap_rw(iocb, from, &ext4_iomap_ops);
+	ret = ext4_handle_inode_extension(inode, offset, ret, count);
 out:
 	inode_unlock(inode);
 	if (ret > 0)
