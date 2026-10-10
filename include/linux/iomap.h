@@ -166,7 +166,8 @@ struct iomap_dio_ops {
 		unsigned int flags);
 };
 ssize_t iomap_dio_rw(struct kiocb *iocb, struct iov_iter *iter,
-		const struct iomap_ops *ops, const struct iomap_dio_ops *dops);
+		const struct iomap_ops *ops, const struct iomap_dio_ops *dops,
+		bool wait_for_completion);
 
 #ifdef CONFIG_SWAP
 struct file;
