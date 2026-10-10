@@ -3521,10 +3521,58 @@ static int ext4_set_iomap(struct inode *inode, struct iomap *iomap,
         return 0;
 }
 
+static int ext4_iomap_alloc(struct inode *inode,
+                            struct ext4_map_blocks *map,
+                            unsigned int flags)
+{
+        handle_t *handle;
+        u8 blkbits = inode->i_blkbits;
+        int ret, dio_credits, retries = 0;
+
+        /* Limit the mapping request for direct I/O. */
+        if (map->m_len > DIO_MAX_BLOCKS)
+                map->m_len = DIO_MAX_BLOCKS;
+
+        dio_credits = ext4_chunk_trans_blocks(inode, map->m_len);
+retry:
+        handle = ext4_journal_start(inode, EXT4_HT_MAP_BLOCKS,
+                                    dio_credits);
+        if (IS_ERR(handle))
+                return PTR_ERR(handle);
+
+        ret = ext4_map_blocks(handle, inode, map,
+                              EXT4_GET_BLOCKS_CREATE_ZERO);
+        if (ret < 0) {
+                ext4_journal_stop(handle);
+                if (ret == -ENOSPC &&
+                    ext4_should_retry_alloc(inode->i_sb, &retries))
+                        goto retry;
+                return ret;
+        }
+
+        /*
+         * Allocations beyond EOF must be recoverable if the system
+         * crashes before the file size is updated.
+         */
+        if (!(flags & IOMAP_FAULT) &&
+            map->m_lblk + map->m_len >
+            (i_size_read(inode) + (1 << blkbits) - 1) >> blkbits) {
+                int err;
+
+                err = ext4_orphan_add(handle, inode);
+                if (err < 0) {
+                        ext4_journal_stop(handle);
+                        return err;
+                }
+        }
+
+        ext4_journal_stop(handle);
+        return ret;
+}
+
 static int ext4_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
 			    unsigned flags, struct iomap *iomap)
 {
-	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
 	unsigned int blkbits = inode->i_blkbits;
 	unsigned long first_block, last_block;
 	struct ext4_map_blocks map;
@@ -3580,74 +3628,24 @@ static int ext4_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
 				delalloc = true;
 			}
 		}
-	} else if (flags & IOMAP_WRITE) {
-		int dio_credits;
-		handle_t *handle;
-		int retries = 0;
+        } else if (flags & IOMAP_WRITE) {
+                /*
+                 * Avoid a journal transaction when the requested blocks
+                 * are already allocated and initialized.
+                 */
+                if (offset + length <= i_size_read(inode)) {
+                        ret = ext4_map_blocks(NULL, inode, &map, 0);
+                        if (ret > 0 &&
+                            (map.m_flags & EXT4_MAP_MAPPED))
+                                goto out;
+                }
 
-		/*
-		 * We check here if the blocks are already allocated, then we
-		 * don't need to start a journal txn and we can directly return
-		 * the mapping information. This could boost performance
-		 * especially in multi-threaded overwrite requests.
-		 */
-		if (offset + length <= i_size_read(inode)) {
-			ret = ext4_map_blocks(NULL, inode, &map, 0);
-			if (ret > 0 && (map.m_flags & EXT4_MAP_MAPPED))
-				goto out;
-		}
-
-		/* Trim mapping request to maximum we can map at once for DIO */
-		if (map.m_len > DIO_MAX_BLOCKS)
-			map.m_len = DIO_MAX_BLOCKS;
-		dio_credits = ext4_chunk_trans_blocks(inode, map.m_len);
-retry:
-		/*
-		 * Either we allocate blocks and then we don't get unwritten
-		 * extent so we have reserved enough credits, or the blocks
-		 * are already allocated and unwritten and in that case
-		 * extent conversion fits in the credits as well.
-		 */
-		handle = ext4_journal_start(inode, EXT4_HT_MAP_BLOCKS,
-					    dio_credits);
-		if (IS_ERR(handle))
-			return PTR_ERR(handle);
-
-		ret = ext4_map_blocks(handle, inode, &map,
-				      EXT4_GET_BLOCKS_CREATE_ZERO);
-		if (ret < 0) {
-			ext4_journal_stop(handle);
-			if (ret == -ENOSPC &&
-			    ext4_should_retry_alloc(inode->i_sb, &retries))
-				goto retry;
-			return ret;
-		}
-
-		/*
-		 * If we added blocks beyond i_size, we need to make sure they
-		 * will get truncated if we crash before updating i_size in
-		 * ext4_iomap_end(). For faults we don't need to do that (and
-		 * even cannot because for orphan list operations inode_lock is
-		 * required) - if we happen to instantiate block beyond i_size,
-		 * it is because we race with truncate which has already added
-		 * the inode to the orphan list.
-		 */
-		if (!(flags & IOMAP_FAULT) && first_block + map.m_len >
-		    (i_size_read(inode) + (1 << blkbits) - 1) >> blkbits) {
-			int err;
-
-			err = ext4_orphan_add(handle, inode);
-			if (err < 0) {
-				ext4_journal_stop(handle);
-				return err;
-			}
-		}
-		ext4_journal_stop(handle);
-	} else {
+                ret = ext4_iomap_alloc(inode, &map, flags);
+        } else {
 		ret = ext4_map_blocks(NULL, inode, &map, 0);
-		if (ret < 0)
-			return ret;
 	}
+        if (ret < 0)
+                return ret;
 out:
         ret = ext4_set_iomap(inode, iomap, &map, offset, length, ret);
         if (ret < 0)
