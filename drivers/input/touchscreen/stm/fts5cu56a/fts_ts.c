@@ -941,11 +941,19 @@ static int fts_set_sip_mode(struct fts_ts_info *info, u8 enable)
 void fts_change_scan_rate(struct fts_ts_info *info, u8 rate)
 {
 	u8 regAdd[2] = {FTS_CMD_SET_GET_REPORT_RATE, rate};
-	int ret = 0;
+	u8 current_rate = 0;
+	int write_ret;
+	int read_ret = -EAGAIN;
 
-	ret = fts_write_reg(info, &regAdd[0], 2);
+	write_ret = fts_write_reg(info, regAdd, sizeof(regAdd));
+	if (write_ret == 1)
+		read_ret = fts_read_reg(info, regAdd, 1,
+					&current_rate, 1);
 
-	input_dbg(true, &info->client->dev, "%s: scan rate (%d Hz), ret = %d\n", __func__, regAdd[1], ret);
+	input_info(true, &info->client->dev,
+		   "%s: requested=%u write_ret=%d read_ret=%d readback=0x%02X (%u)\n",
+		   __func__, rate, write_ret, read_ret,
+		   current_rate, current_rate);
 }
 
 void fts_interrupt_set(struct fts_ts_info *info, int enable)
@@ -3688,7 +3696,7 @@ void fts_reinit(struct fts_ts_info *info, bool delay)
 
 	fts_set_fod_rect(info);
 
-	fts_change_scan_rate(info, 120);
+	fts_change_scan_rate(info, 240);
 
 	if (info->brush_mode) {
 		u8 regAdd[3] = {FTS_CMD_SET_FUNCTION_ONOFF, FTS_FUNCTION_ENABLE_BRUSH_MODE, info->brush_mode};
