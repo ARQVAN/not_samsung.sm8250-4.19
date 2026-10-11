@@ -29,6 +29,7 @@
 #include <linux/pagevec.h>
 #include <linux/uio.h>
 #include <linux/mman.h>
+#include <linux/backing-dev.h>
 #include "ext4.h"
 #include "ext4_jbd2.h"
 #include "xattr.h"
@@ -229,7 +230,7 @@ static bool ext4_overwrite_io(struct inode *inode, loff_t pos, loff_t len)
 	return err == blklen && (map.m_flags & EXT4_MAP_MAPPED);
 }
 
-static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
+static ssize_t ext4_generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
 	ssize_t ret;
@@ -253,6 +254,51 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 		iov_iter_truncate(from, sbi->s_bitmap_maxbytes - iocb->ki_pos);
 	}
 	return iov_iter_count(from);
+}
+
+static ssize_t ext4_write_checks(struct kiocb *iocb,
+                                 struct iov_iter *from)
+{
+        ssize_t count, ret;
+
+        count = ext4_generic_write_checks(iocb, from);
+        if (count <= 0)
+                return count;
+
+        ret = kiocb_modified(iocb);
+        if (ret)
+                return ret;
+
+        return count;
+}
+
+static ssize_t ext4_buffered_write_iter(struct kiocb *iocb,
+                                        struct iov_iter *from)
+{
+        ssize_t ret;
+        struct inode *inode = file_inode(iocb->ki_filp);
+
+        if (iocb->ki_flags & IOCB_NOWAIT)
+                return -EOPNOTSUPP;
+
+        inode_lock(inode);
+        inode_dio_wait(inode);
+        ret = ext4_write_checks(iocb, from);
+        if (ret <= 0)
+                goto out;
+
+        current->backing_dev_info = inode_to_bdi(inode);
+        ret = generic_perform_write(iocb->ki_filp, from, iocb->ki_pos);
+        current->backing_dev_info = NULL;
+
+out:
+        inode_unlock(inode);
+        if (likely(ret > 0)) {
+                iocb->ki_pos += ret;
+                ret = generic_write_sync(iocb, ret);
+        }
+
+        return ret;
 }
 
 static __maybe_unused ssize_t ext4_handle_inode_extension(struct inode *inode,
@@ -306,8 +352,8 @@ static __maybe_unused ssize_t ext4_handle_inode_extension(struct inode *inode,
         /*
          * Truncate allocated blocks that were not written past EOF.
          */
-        written_blk = ALIGN(offset + written, 1 << blkbits);
-        end_blk = ALIGN(offset + count, 1 << blkbits);
+        written_blk = ALIGN(offset + written, 1 << blkbits) >> blkbits;
+        end_blk = ALIGN(offset + count, 1 << blkbits) >> blkbits;
         if (written_blk < end_blk && ext4_can_truncate(inode))
                 truncate = true;
 
@@ -326,6 +372,141 @@ truncate:
         return written;
 }
 
+static int ext4_dio_write_end_io(struct kiocb *iocb, ssize_t size,
+                                 int error, unsigned int flags)
+{
+        loff_t pos = iocb->ki_pos;
+        struct inode *inode = file_inode(iocb->ki_filp);
+
+        if (error)
+                return error;
+
+        if (size && (flags & IOMAP_DIO_UNWRITTEN)) {
+                error = ext4_convert_unwritten_extents(NULL, inode,
+                                                       pos, size);
+                if (error < 0)
+                        return error;
+        }
+
+        /*
+         * Update i_size before iomap invalidates the page cache.
+         * The on-disk size and orphan handling are completed later.
+         */
+        pos += size;
+        if (pos > i_size_read(inode))
+                i_size_write(inode, pos);
+
+        return 0;
+}
+
+static const struct iomap_dio_ops ext4_dio_write_ops = {
+        .end_io = ext4_dio_write_end_io,
+};
+
+static ssize_t ext4_dio_write_iter(struct kiocb *iocb,
+                                   struct iov_iter *from)
+{
+        ssize_t ret;
+        size_t count;
+        loff_t offset;
+        handle_t *handle;
+        struct inode *inode = file_inode(iocb->ki_filp);
+        bool extend = false, overwrite = false, unaligned_aio = false;
+
+        if (iocb->ki_flags & IOCB_NOWAIT) {
+                if (!inode_trylock(inode))
+                        return -EAGAIN;
+        } else {
+                inode_lock(inode);
+        }
+
+        if (!ext4_dio_supported(iocb, from)) {
+                inode_unlock(inode);
+                return ext4_buffered_write_iter(iocb, from);
+        }
+
+        ret = ext4_write_checks(iocb, from);
+        if (ret <= 0) {
+                inode_unlock(inode);
+                return ret;
+        }
+
+        offset = iocb->ki_pos;
+        count = iov_iter_count(from);
+
+        if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS) &&
+            !is_sync_kiocb(iocb) &&
+            ext4_unaligned_aio(inode, from, offset)) {
+                unaligned_aio = true;
+                inode_dio_wait(inode);
+        }
+
+        if (!unaligned_aio &&
+            ext4_overwrite_io(inode, offset, count) &&
+            ext4_should_dioread_nolock(inode)) {
+                overwrite = true;
+                downgrade_write(&inode->i_rwsem);
+        }
+
+        if (offset + count > EXT4_I(inode)->i_disksize) {
+                if (iocb->ki_flags & IOCB_NOWAIT) {
+                        ret = -EAGAIN;
+                        goto out;
+                }
+
+                handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
+                if (IS_ERR(handle)) {
+                        ret = PTR_ERR(handle);
+                        goto out;
+                }
+
+                ret = ext4_orphan_add(handle, inode);
+                if (ret) {
+                        ext4_journal_stop(handle);
+                        goto out;
+                }
+
+                extend = true;
+                ext4_journal_stop(handle);
+        }
+
+        ret = iomap_dio_rw(iocb, from, &ext4_iomap_ops,
+                           &ext4_dio_write_ops,
+                           is_sync_kiocb(iocb) || unaligned_aio || extend);
+
+        if (extend)
+                ret = ext4_handle_inode_extension(inode, offset, ret, count);
+
+out:
+        if (overwrite)
+                inode_unlock_shared(inode);
+        else
+                inode_unlock(inode);
+
+        if (ret >= 0 && iov_iter_count(from)) {
+                ssize_t err;
+                loff_t endbyte;
+
+                offset = iocb->ki_pos;
+                err = ext4_buffered_write_iter(iocb, from);
+                if (err < 0)
+                        return err;
+
+                ret += err;
+                endbyte = offset + err - 1;
+                err = filemap_write_and_wait_range(
+                        iocb->ki_filp->f_mapping, offset, endbyte);
+                if (!err)
+                        invalidate_mapping_pages(
+                                iocb->ki_filp->f_mapping,
+                                offset >> PAGE_SHIFT,
+                                endbyte >> PAGE_SHIFT);
+        }
+
+        return ret;
+}
+
+
 #ifdef CONFIG_FS_DAX
 static ssize_t
 ext4_dax_write_iter(struct kiocb *iocb, struct iov_iter *from)
@@ -343,24 +524,26 @@ ext4_dax_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	} else {
 		inode_lock(inode);
 	}
-	ret = ext4_write_checks(iocb, from);
+	ret = ext4_generic_write_checks(iocb, from);
 	if (ret <= 0)
 		goto out;
-	ret = file_remove_privs(iocb->ki_filp);
-	if (ret)
-		goto out;
-	ret = file_update_time(iocb->ki_filp);
-	if (ret)
-		goto out;
+
 
 	offset = iocb->ki_pos;
 	count = iov_iter_count(from);
 
+	/* Reject extending NOWAIT before metadata changes. */
+	if ((iocb->ki_flags & IOCB_NOWAIT) &&
+	    offset + count > EXT4_I(inode)->i_disksize) {
+	        ret = -EAGAIN;
+	        goto out;
+	}
+
+	ret = kiocb_modified(iocb);
+	if (ret)
+	        goto out;
+
 	if (offset + count > EXT4_I(inode)->i_disksize) {
-		if (iocb->ki_flags & IOCB_NOWAIT) {
-			ret = -EAGAIN;
-			goto out;
-		}
 		handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
 		if (IS_ERR(handle)) {
 			ret = PTR_ERR(handle);
@@ -390,7 +573,7 @@ out:
 #endif
 
 static ssize_t
-ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+ext4_legacy_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
 	int o_direct = iocb->ki_flags & IOCB_DIRECT;
@@ -405,8 +588,8 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (IS_DAX(inode))
 		return ext4_dax_write_iter(iocb, from);
 #endif
-	if (!o_direct && (iocb->ki_flags & IOCB_NOWAIT))
-		return -EOPNOTSUPP;
+	if (!o_direct)
+		return ext4_buffered_write_iter(iocb, from);
 
 	if (!inode_trylock(inode)) {
 		if (iocb->ki_flags & IOCB_NOWAIT)
@@ -414,7 +597,7 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		inode_lock(inode);
 	}
 
-	ret = ext4_write_checks(iocb, from);
+	ret = ext4_generic_write_checks(iocb, from);
 	if (ret <= 0)
 		goto out;
 
@@ -460,6 +643,33 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 out:
 	inode_unlock(inode);
 	return ret;
+}
+
+static ssize_t
+ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+        struct inode *inode = file_inode(iocb->ki_filp);
+
+        if (unlikely(ext4_forced_shutdown(EXT4_SB(inode->i_sb))))
+                return -EIO;
+
+#ifdef CONFIG_FS_DAX
+        if (IS_DAX(inode))
+                return ext4_dax_write_iter(iocb, from);
+#endif
+
+        if (!(iocb->ki_flags & IOCB_DIRECT))
+                return ext4_buffered_write_iter(iocb, from);
+
+#ifdef CONFIG_FS_HPB
+        if (ext4_test_inode_state(inode, EXT4_STATE_HPB))
+                return ext4_legacy_file_write_iter(iocb, from);
+#endif
+
+        if (iocb->ki_flags & IOCB_NOWAIT)
+                return ext4_legacy_file_write_iter(iocb, from);
+
+        return ext4_dio_write_iter(iocb, from);
 }
 
 #ifdef CONFIG_FS_DAX

@@ -3526,9 +3526,10 @@ static int ext4_iomap_alloc(struct inode *inode,
                             unsigned int flags)
 {
         handle_t *handle;
-        int ret, dio_credits, retries = 0;
+        u8 blkbits = inode->i_blkbits;
+        int ret, dio_credits, m_flags = 0, retries = 0;
 
-        /* Limit the mapping request for direct I/O. */
+        /* Limit the mapping request to the maximum DIO mapping size. */
         if (map->m_len > DIO_MAX_BLOCKS)
                 map->m_len = DIO_MAX_BLOCKS;
 
@@ -3539,17 +3540,44 @@ retry:
         if (IS_ERR(handle))
                 return PTR_ERR(handle);
 
-        ret = ext4_map_blocks(handle, inode, map,
-                              EXT4_GET_BLOCKS_CREATE_ZERO);
-        if (ret < 0) {
-                ext4_journal_stop(handle);
-                if (ret == -ENOSPC &&
-                    ext4_should_retry_alloc(inode->i_sb, &retries))
-                        goto retry;
-                return ret;
+        /*
+         * DAX and direct I/O are the only operations currently supported
+         * with IOMAP_WRITE.
+         */
+        WARN_ON(!IS_DAX(inode) && !(flags & IOMAP_DIRECT));
+
+        if (IS_DAX(inode)) {
+                m_flags = EXT4_GET_BLOCKS_CREATE_ZERO;
+        } else if (((loff_t)map->m_lblk << blkbits) >=
+                   i_size_read(inode)) {
+                /*
+                 * Use i_size rather than i_disksize: delayed-allocation
+                 * writeback can advance i_disksize during this I/O and
+                 * expose allocated blocks to concurrent direct reads.
+                 */
+                m_flags = EXT4_GET_BLOCKS_CREATE;
+        } else if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS)) {
+                /*
+                 * Extent-based files can safely use unwritten extents.
+                 */
+                m_flags = EXT4_GET_BLOCKS_IO_CREATE_EXT;
         }
 
+        ret = ext4_map_blocks(handle, inode, map, m_flags);
+
+        /*
+         * Indirect-mapped files cannot safely allocate a hole for DIO.
+         * Return the iomap fallback code so buffered I/O can complete it.
+         */
+        if (!m_flags && !ret)
+                ret = -ENOTBLK;
+
         ext4_journal_stop(handle);
+
+        if (ret == -ENOSPC &&
+            ext4_should_retry_alloc(inode->i_sb, &retries))
+                goto retry;
+
         return ret;
 }
 
@@ -3602,6 +3630,13 @@ static int ext4_iomap_end(struct inode *inode, loff_t offset,
                           loff_t length, ssize_t written, unsigned flags,
                           struct iomap *iomap)
 {
+        /*
+         * If no data was written, request buffered I/O fallback.
+         * Blocks allocated for DIO can be reused by buffered I/O.
+         */
+        if (flags & (IOMAP_WRITE | IOMAP_DIRECT) && written == 0)
+                return -ENOTBLK;
+
         return 0;
 }
 
