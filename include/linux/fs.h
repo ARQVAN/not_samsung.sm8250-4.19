@@ -2286,6 +2286,7 @@ static inline void file_accessed(struct file *file)
 }
 
 extern int file_modified(struct file *file);
+extern int kiocb_modified(struct kiocb *iocb);
 
 int sync_inode(struct inode *inode, struct writeback_control *wbc);
 int sync_inode_metadata(struct inode *inode, int wait);

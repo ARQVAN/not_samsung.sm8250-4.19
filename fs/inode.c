@@ -1697,6 +1697,8 @@ static int update_time(struct inode *inode, struct timespec64 *time, int flags)
 	return update_time(inode, time, flags);
 }
 
+
+
 /**
  *	touch_atime	-	update the access time
  *	@path: the &struct path to update
@@ -1840,7 +1842,7 @@ static int __remove_privs(struct vfsmount *mnt, struct dentry *dentry, int kill)
  * Remove special file priviledges (suid, capabilities) when file is written
  * to or truncated.
  */
-int file_remove_privs(struct file *file)
+static int file_remove_privs_flags(struct file *file, unsigned int flags)
 {
 	struct dentry *dentry = file_dentry(file);
 	struct inode *inode = file_inode(file);
@@ -1859,29 +1861,24 @@ int file_remove_privs(struct file *file)
 	kill = dentry_needs_remove_privs(dentry);
 	if (kill < 0)
 		return kill;
-	if (kill)
+	if (kill) {
+		if (flags & IOCB_NOWAIT)
+			return -EAGAIN;
 		error = __remove_privs(file->f_path.mnt, dentry, kill);
+	}
 	if (!error)
 		inode_has_no_xattr(inode);
 
 	return error;
 }
+
+int file_remove_privs(struct file *file)
+{
+	return file_remove_privs_flags(file, 0);
+}
 EXPORT_SYMBOL(file_remove_privs);
 
-/**
- *	file_update_time	-	update mtime and ctime time
- *	@file: file accessed
- *
- *	Update the mtime and ctime members of an inode and mark the inode
- *	for writeback.  Note that this function is meant exclusively for
- *	usage in the file write path of filesystems, and filesystems may
- *	choose to explicitly ignore update via this function with the
- *	S_NOCMTIME inode flag, e.g. for network filesystem where these
- *	timestamps are handled by the server.  This can return an error for
- *	file systems who need to allocate space in order to update an inode.
- */
-
-int file_update_time(struct file *file)
+static int file_update_time_flags(struct file *file, unsigned int flags)
 {
 	struct inode *inode = file_inode(file);
 	struct timespec64 now;
@@ -1904,6 +1901,8 @@ int file_update_time(struct file *file)
 
 	if (!sync_it)
 		return 0;
+	if (flags & IOCB_NOWAIT)
+		return -EAGAIN;
 
 	/* Finally allowed to write? Takes lock. */
 	if (__mnt_want_write_file(file))
@@ -1913,6 +1912,24 @@ int file_update_time(struct file *file)
 	__mnt_drop_write_file(file);
 
 	return ret;
+}
+
+/**
+ *	file_update_time	-	update mtime and ctime time
+ *	@file: file accessed
+ *
+ *	Update the mtime and ctime members of an inode and mark the inode
+ *	for writeback.  Note that this function is meant exclusively for
+ *	usage in the file write path of filesystems, and filesystems may
+ *	choose to explicitly ignore update via this function with the
+ *	S_NOCMTIME inode flag, e.g. for network filesystem where these
+ *	timestamps are handled by the server.  This can return an error for
+ *	file systems who need to allocate space in order to update an inode.
+ */
+
+int file_update_time(struct file *file)
+{
+	return file_update_time_flags(file, 0);
 }
 EXPORT_SYMBOL(file_update_time);
 
@@ -1935,6 +1952,22 @@ int file_modified(struct file *file)
 	return file_update_time(file);
 }
 EXPORT_SYMBOL(file_modified);
+int kiocb_modified(struct kiocb *iocb)
+{
+        struct file *file = iocb->ki_filp;
+        int ret;
+
+        ret = file_remove_privs_flags(file, iocb->ki_flags);
+        if (ret)
+                return ret;
+
+        if (unlikely(file->f_mode & FMODE_NOCMTIME))
+                return 0;
+
+        return file_update_time_flags(file, iocb->ki_flags);
+}
+EXPORT_SYMBOL_GPL(kiocb_modified);
+
 
 int inode_needs_sync(struct inode *inode)
 {
