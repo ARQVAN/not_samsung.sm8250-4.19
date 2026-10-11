@@ -255,7 +255,7 @@ static ssize_t ext4_write_checks(struct kiocb *iocb, struct iov_iter *from)
 	return iov_iter_count(from);
 }
 
-static ssize_t ext4_handle_inode_extension(struct inode *inode,
+static __maybe_unused ssize_t ext4_handle_inode_extension(struct inode *inode,
                                            loff_t offset,
                                            ssize_t written, size_t count)
 {
