@@ -199,7 +199,8 @@ static unsigned long dir_block_index(unsigned int level,
 static struct f2fs_dir_entry *find_in_block(struct inode *dir,
 				struct page *dentry_page,
 				const struct f2fs_filename *fname,
-				int *max_slots)
+				int *max_slots,
+				struct f2fs_decrypted_name_prealloc *prealloc)
 {
 	struct f2fs_dentry_block *dentry_blk;
 	struct f2fs_dentry_ptr d;
@@ -207,10 +208,32 @@ static struct f2fs_dir_entry *find_in_block(struct inode *dir,
 	dentry_blk = (struct f2fs_dentry_block *)page_address(dentry_page);
 
 	make_dentry_ptr_block(dir, &d, dentry_blk);
-	return f2fs_find_target_dentry(&d, fname, max_slots);
+	return f2fs_find_target_dentry(&d, fname, max_slots, prealloc);
 }
 
 #ifdef CONFIG_UNICODE
+#define F2FS_DECRYPTED_NAME_PREALLOC_MIN_LEN 64
+
+static char *f2fs_decrypted_name_prealloc_resize(
+                struct f2fs_decrypted_name_prealloc *prealloc,
+                size_t wantlen)
+{
+        char *retbuf;
+
+        if (prealloc->name && wantlen <= prealloc->size)
+                return prealloc->name;
+
+        retbuf = kmalloc(wantlen + F2FS_DECRYPTED_NAME_PREALLOC_MIN_LEN,
+                         GFP_KERNEL);
+        if (!retbuf)
+                return NULL;
+
+        kfree(prealloc->name);
+        prealloc->name = retbuf;
+        prealloc->size = wantlen + F2FS_DECRYPTED_NAME_PREALLOC_MIN_LEN;
+        return retbuf;
+}
+
 /*
  * Test whether a case-insensitive directory entry matches the filename
  * being searched for.
@@ -218,7 +241,8 @@ static struct f2fs_dir_entry *find_in_block(struct inode *dir,
  * Returns 1 for a match, 0 for no match, and -errno on an error.
  */
 static int f2fs_match_ci_name(const struct inode *dir, const struct qstr *name,
-			       const u8 *de_name, u32 de_name_len)
+			       const u8 *de_name, u32 de_name_len,
+				struct f2fs_decrypted_name_prealloc *prealloc)
 {
 	const struct super_block *sb = dir->i_sb;
 	const struct unicode_map *um = sb->s_encoding;
@@ -233,7 +257,10 @@ static int f2fs_match_ci_name(const struct inode *dir, const struct qstr *name,
 		if (WARN_ON_ONCE(!fscrypt_has_encryption_key(dir)))
 			return -EINVAL;
 
-		decrypted_name.name = kmalloc(de_name_len, GFP_KERNEL);
+		if (prealloc)
+			decrypted_name.name = f2fs_decrypted_name_prealloc_resize(prealloc, de_name_len);
+		else
+			decrypted_name.name = kmalloc(de_name_len, GFP_KERNEL);
 		if (!decrypted_name.name)
 			return -ENOMEM;
 		res = fscrypt_fname_disk_to_usr(dir, 0, 0, &encrypted_name,
@@ -257,22 +284,28 @@ static int f2fs_match_ci_name(const struct inode *dir, const struct qstr *name,
 		res = (res == 0);
 	}
 out:
-	kfree(decrypted_name.name);
+	if (!prealloc)
+		kfree(decrypted_name.name);
 	return res;
 }
 #endif /* CONFIG_UNICODE */
 
 static inline int f2fs_match_name(const struct inode *dir,
 				   const struct f2fs_filename *fname,
-				   const u8 *de_name, u32 de_name_len)
+				   const u8 *de_name, u32 de_name_len,
+				struct f2fs_decrypted_name_prealloc *prealloc)
 {
 	struct fscrypt_name f;
+
+#ifndef CONFIG_UNICODE
+	(void)prealloc;
+#endif
 
 #ifdef CONFIG_UNICODE
 	if (fname->cf_name.name) {
 		struct qstr cf = FSTR_TO_QSTR(&fname->cf_name);
 
-		return f2fs_match_ci_name(dir, &cf, de_name, de_name_len);
+		return f2fs_match_ci_name(dir, &cf, de_name, de_name_len, prealloc);
 	}
 #endif
 	f.usr_fname = fname->usr_fname;
@@ -284,7 +317,8 @@ static inline int f2fs_match_name(const struct inode *dir,
 }
 
 struct f2fs_dir_entry *f2fs_find_target_dentry(const struct f2fs_dentry_ptr *d,
-			const struct f2fs_filename *fname, int *max_slots)
+			const struct f2fs_filename *fname, int *max_slots,
+			struct f2fs_decrypted_name_prealloc *prealloc)
 {
 	struct f2fs_dir_entry *de;
 	unsigned long bit_pos = 0;
@@ -310,7 +344,7 @@ struct f2fs_dir_entry *f2fs_find_target_dentry(const struct f2fs_dentry_ptr *d,
 		if (de->hash_code == fname->hash) {
 			res = f2fs_match_name(d->inode, fname,
 					      d->filename[bit_pos],
-					      le16_to_cpu(de->name_len));
+					      le16_to_cpu(de->name_len), prealloc);
 			if (res < 0)
 				return ERR_PTR(res);
 			if (res)
@@ -334,7 +368,8 @@ found:
 static struct f2fs_dir_entry *find_in_level(struct inode *dir,
 					unsigned int level,
 					const struct f2fs_filename *fname,
-					struct page **res_page)
+					struct page **res_page,
+					struct f2fs_decrypted_name_prealloc *prealloc)
 {
 	int s = GET_DENTRY_SLOTS(fname->disk_name.len);
 	unsigned int nbucket, nblock;
@@ -366,7 +401,7 @@ static struct f2fs_dir_entry *find_in_level(struct inode *dir,
 			}
 		}
 
-		de = find_in_block(dir, dentry_page, fname, &max_slots);
+		de = find_in_block(dir, dentry_page, fname, &max_slots, prealloc);
 		if (IS_ERR(de)) {
 			*res_page = ERR_CAST(de);
 			de = NULL;
@@ -399,11 +434,12 @@ struct f2fs_dir_entry *__f2fs_find_entry(struct inode *dir,
 	struct f2fs_dir_entry *de = NULL;
 	unsigned int max_depth;
 	unsigned int level;
+	struct f2fs_decrypted_name_prealloc prealloc = { 0 };
 
 	*res_page = NULL;
 
 	if (f2fs_has_inline_dentry(dir)) {
-		de = f2fs_find_in_inline_dir(dir, fname, res_page);
+		de = f2fs_find_in_inline_dir(dir, fname, res_page, &prealloc);
 		goto out;
 	}
 
@@ -419,7 +455,7 @@ struct f2fs_dir_entry *__f2fs_find_entry(struct inode *dir,
 	}
 
 	for (level = 0; level < max_depth; level++) {
-		de = find_in_level(dir, level, fname, res_page);
+		de = find_in_level(dir, level, fname, res_page, &prealloc);
 		if (de || IS_ERR(*res_page))
 			break;
 	}
@@ -427,6 +463,7 @@ out:
 	/* This is to increase the speed of f2fs_create */
 	if (!de)
 		F2FS_I(dir)->task = current;
+	kfree(prealloc.name);
 	return de;
 }
 
