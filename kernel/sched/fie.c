@@ -131,7 +131,6 @@ static DEFINE_PER_CPU_READ_MOSTLY(bool, cpu_has_amu_const);
 static DEFINE_PER_CPU_READ_MOSTLY(u32, cpu_max_freq);
 
 enum cpu_throttle_src {
-	CPU_CPUFREQ_THROTTLE,
 	CPU_HW_THROTTLE,
 	MAX_CPU_THROTTLE_SRCS
 };
@@ -473,20 +472,6 @@ static void update_thermal_pressure(struct throt_data *t,
 	arch_update_thermal_pressure(&t->cpus, capped_freq);
 }
 
-void fie_cpufreq_pressure(int cpu, unsigned int cap)
-{
-	struct throt_data *t = per_cpu(domain_throt_data, cpu);
-	unsigned long flags;
-
-	if (!t)
-		return;
-
-	/* Update the throttle set via cpufreq policy (e.g., via LMh) */
-	raw_spin_lock_irqsave(&t->throt_lock, flags);
-	update_thermal_pressure(t, CPU_CPUFREQ_THROTTLE, cap);
-	raw_spin_unlock_irqrestore(&t->throt_lock, flags);
-}
-EXPORT_SYMBOL_GPL(fie_cpufreq_pressure);
 
 void fie_rate_set(int cpu, unsigned int freq)
 {
