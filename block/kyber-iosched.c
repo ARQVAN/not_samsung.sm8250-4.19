@@ -69,10 +69,10 @@ enum {
  * these to a reasonable value.
  */
 static const unsigned int kyber_depth[] = {
-	[KYBER_READ] = 256,
-	[KYBER_WRITE] = 128,
-	[KYBER_DISCARD] = 64,
-	[KYBER_OTHER] = 16,
+	[KYBER_READ] = 32,
+	[KYBER_WRITE] = 16,
+	[KYBER_DISCARD] = 8,
+	[KYBER_OTHER] = 4,
 };
 
 /*
@@ -80,7 +80,7 @@ static const unsigned int kyber_depth[] = {
  */
 static const u64 kyber_latency_targets[] = {
 	[KYBER_READ] = 2ULL * NSEC_PER_MSEC,
-	[KYBER_WRITE] = 10ULL * NSEC_PER_MSEC,
+	[KYBER_WRITE] = 8ULL * NSEC_PER_MSEC,
 	[KYBER_DISCARD] = 5ULL * NSEC_PER_SEC,
 };
 
@@ -89,8 +89,8 @@ static const u64 kyber_latency_targets[] = {
  * domain.
  */
 static const unsigned int kyber_batch_size[] = {
-	[KYBER_READ] = 16,
-	[KYBER_WRITE] = 8,
+	[KYBER_READ] = 8,
+	[KYBER_WRITE] = 4,
 	[KYBER_DISCARD] = 1,
 	[KYBER_OTHER] = 1,
 };
