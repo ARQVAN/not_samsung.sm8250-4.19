@@ -642,7 +642,10 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 		scm_data[0] = level;
 		scm_data[1] = priv->bin.total_time;
 		if (refresh_rate > 60) {
-			scm_data[2] = priv->bin.busy_time + (priv->bin.busy_time >> 2); // 25%
+			/* Increase GPU load bias for high refresh rates. */
+			scm_data[2] = priv->bin.busy_time +
+				(priv->bin.busy_time >> 2) +
+				(priv->bin.busy_time >> 3);
 		} else {
 			scm_data[2] = priv->bin.busy_time;
 		}
