@@ -565,7 +565,8 @@ void blk_account_tw_io(struct request_queue *q, int opf, int bytes)
 void blk_sync_queue(struct request_queue *q)
 {
 	del_timer_sync(&q->timeout);
-	cancel_work_sync(&q->timeout_work);
+	if (q->timeout_work.func)
+		cancel_work_sync(&q->timeout_work);
 
 	if (queue_is_mq(q)) {
 		struct blk_mq_hw_ctx *hctx;
