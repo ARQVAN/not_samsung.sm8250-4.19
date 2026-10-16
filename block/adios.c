@@ -717,7 +717,7 @@ static inline u32 eval_adios_state(struct adios_data *ad, u32 shift)
 { return eval_this_adios_state(get_adios_state(ad), shift); }
 
 // Add a request to the deadline-sorted red-black tree
-static void add_to_dl_tree(
+static bool add_to_dl_tree(
 		struct adios_data *ad, bool dl_idx, struct request *rq) {
 	struct rb_root_cached *root = &ad->dl_tree[dl_idx];
 	struct rb_node **link = &(root->rb_root.rb_node), *parent = NULL;
@@ -763,7 +763,7 @@ static void add_to_dl_tree(
 	if (!dlg || dlg->deadline != deadline) {
 		dlg = kmem_cache_zalloc(ad->dl_group_pool, GFP_ATOMIC);
 		if (!dlg)
-			return;
+			return false;
 		dlg->deadline = deadline;
 		INIT_LIST_HEAD(&dlg->rqs);
 		rb_link_node(&dlg->node, parent, link);
@@ -775,6 +775,8 @@ found:
 
 	if (was_empty)
 		set_adios_state(ad, ADIOS_STATE_DL, dl_idx, true);
+
+	return true;
 }
 
 // Remove a request from the deadline-sorted red-black tree
@@ -838,16 +840,6 @@ static void adios_depth_updated(struct blk_mq_hw_ctx *hctx) {
 	sbitmap_queue_min_shallow_depth(&tags->bitmap_tags, ad->async_depth);
 }
 
-// Handle request merging after a merge operation
-static void adios_request_merged(struct request_queue *q, struct request *req,
-				  enum elv_merge type) {
-	bool dl_idx = adios_optype_not_read(req);
-	struct adios_data *ad = q->elevator->elevator_data;
-
-	// Reposition request in the deadline-sorted tree
-	del_from_dl_tree(ad, dl_idx, req);
-	add_to_dl_tree(ad, dl_idx, req);
-}
 
 // Handle merging of requests after one has been merged into another
 static void adios_merged_requests(struct request_queue *q, struct request *req,
@@ -879,6 +871,9 @@ static bool adios_bio_merge(struct request_queue *q, struct bio *bio) {
 	return ret;
 }
 
+static void insert_to_prio_queue(struct adios_data *ad,
+                                 struct request *rq, bool pq_idx);
+
 static bool merge_or_insert_to_dl_tree(struct adios_data *ad,
 		struct request *rq, struct request_queue *q, struct list_head *free) {
 	bool dl_idx = adios_optype_not_read(rq);
@@ -886,8 +881,13 @@ static bool merge_or_insert_to_dl_tree(struct adios_data *ad,
 	if (blk_mq_sched_try_insert_merge(q, rq, free))
 		return true;
 
+	if (!add_to_dl_tree(ad, dl_idx, rq)) {
+		/* Never lose a request when deadline allocation fails. */
+		insert_to_prio_queue(ad, rq, 0);
+		return false;
+	}
+
 	blk_mq_sched_request_inserted(rq);
-	add_to_dl_tree(ad, dl_idx, rq);
 
 	if (rq_mergeable(rq)) {
 		elv_rqhash_add(q, rq);
@@ -1253,7 +1253,8 @@ static struct request *pop_next_bq_request_elevator(struct adios_data *ad) {
 	rq = pop_bq_request(ad, bq_idx, direction);
 
 	/* If batch queue for the sync requests just became empty */
-	if (bq_idx == 0 && rq && !(bq_state & 0x1))
+	if (bq_idx == 0 && rq &&
+		!(ad->bq_state[ad->bq_page] & 0x1))
 		update_elv_direction(ad);
 
 	return rq;
@@ -1318,7 +1319,7 @@ static struct request *dispatch_from_pq(struct adios_data *ad) {
 
 	spin_lock_irqsave(&ad->pq_lock, flags);
 	u32 pq_state = eval_adios_state(ad, ADIOS_STATE_PQ);
-	u8  pq_idx = pq_state >> 1;
+	u8  pq_idx = (pq_state & 1) ? 0 : 1;
 	struct list_head *q = &ad->prio_queue[pq_idx];
 
 	if (unlikely(list_empty(q))) {
@@ -1369,7 +1370,14 @@ static void update_timer_callback(struct timer_list *t) {
 // Handle the completion of a request
 static void adios_completed_request(struct request *rq, u64 now) {
 	struct adios_data *ad = rq->q->elevator->elevator_data;
-	struct adios_rq_data *rd = get_rq_data(rq);
+	struct adios_rq_data *rd;
+
+	if (!(rq->rq_flags & RQF_ELVPRIV))
+		return;
+
+	rd = get_rq_data(rq);
+	if (WARN_ON_ONCE(!rd))
+		return;
 	union adios_in_flight_rqs ifr =
 		adios_uncharge_request(ad, rd);
 	u8 optype = adios_optype(rq);
@@ -1477,7 +1485,8 @@ static int adios_init_sched(struct request_queue *q, struct elevator_type *e) {
 	}
 
 	ad->rq_data_pool = mempool_create_slab_pool(
-						q->nr_requests, ad->rq_data_cache);
+						q->nr_requests * q->nr_hw_queues,
+						ad->rq_data_cache);
 	if (!ad->rq_data_pool) {
 		pr_err("adios: Failed to create rq_data_pool\n");
 		goto destroy_rq_data_cache;
@@ -1994,7 +2003,6 @@ static struct elevator_type mq_adios = {
 		.former_request		= elv_rb_former_request,
 		.limit_depth		= adios_limit_depth,
 		.depth_updated		= adios_depth_updated,
-		.request_merged		= adios_request_merged,
 		.requests_merged	= adios_merged_requests,
 		.bio_merge			= adios_bio_merge,
 		.insert_requests	= adios_insert_requests,
