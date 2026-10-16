@@ -652,6 +652,17 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 		scm_data[3] = context_count;
 		__secure_tz_update_entry3(scm_data, sizeof(scm_data),
 					&val, sizeof(val), priv);
+
+		/*
+		 * At high refresh rates, ramp up at least one level
+		 * when GPU utilization reaches 50 percent.
+		 * Preserve larger upward decisions from TrustZone.
+		 */
+		if (refresh_rate > 60 && level > 0 &&
+		    priv->bin.total_time &&
+		    (u64)priv->bin.busy_time * 2 >= priv->bin.total_time &&
+		    val == 0)
+			val = -1;
 	}
 	priv->bin.total_time = 0;
 	priv->bin.busy_time = 0;
