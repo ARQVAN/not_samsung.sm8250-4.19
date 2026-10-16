@@ -5,7 +5,7 @@ menu "IO Schedulers"
 
 config MQ_IOSCHED_ADIOS
 	tristate "ADIOS adaptive deadline I/O scheduler"
-	default n
+	default y
 	help
 	  Adaptive Deadline I/O Scheduler with latency modeling
 	  and request batching.

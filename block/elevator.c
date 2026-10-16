@@ -626,15 +626,19 @@ int elevator_init_mq(struct request_queue *q)
 	if (unlikely(q->elevator))
 		goto out;
 
-	if (IS_ENABLED(CONFIG_MQ_IOSCHED_KYBER)) {
+	e = NULL;
+
+	if (IS_ENABLED(CONFIG_MQ_IOSCHED_ADIOS))
+		e = elevator_get(q, "adios", false);
+
+	if (!e && IS_ENABLED(CONFIG_MQ_IOSCHED_KYBER))
 		e = elevator_get(q, "kyber", false);
-		if (!e)
-			goto out;
-	} else {
+
+	if (!e)
 		e = elevator_get(q, "mq-deadline", false);
-		if (!e)
-			goto out;
-	}
+
+	if (!e)
+		goto out;
 	err = blk_mq_init_sched(q, e);
 	if (err)
 		elevator_put(e);
