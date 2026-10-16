@@ -299,8 +299,10 @@ struct adios_rq_data {
 	struct request *rq;
 	u64 deadline;
 	u64 pred_lat;
+	u64 accounted_pred_lat;
 	u32 block_size;
 	bool managed;
+	bool accounted;
 } __attribute__((aligned(64)));
 
 static const int adios_prio_to_wmult[40] = {
@@ -896,17 +898,49 @@ static bool merge_or_insert_to_dl_tree(struct adios_data *ad,
 	return false;
 }
 
+static void adios_charge_request(struct adios_data *ad,
+                                 struct adios_rq_data *rd)
+{
+    union adios_in_flight_rqs ifr;
+
+    if (rd->accounted)
+        return;
+
+    rd->accounted_pred_lat = rd->pred_lat;
+    ifr.scalar = 0;
+    ifr.count = 1;
+    ifr.total_pred_lat = rd->accounted_pred_lat;
+
+    atomic64_add(ifr.scalar, &ad->in_flight_rqs.atomic);
+    rd->accounted = true;
+}
+
+static union adios_in_flight_rqs
+adios_uncharge_request(struct adios_data *ad,
+                       struct adios_rq_data *rd)
+{
+    union adios_in_flight_rqs ifr = { .scalar = 0 };
+    union adios_in_flight_rqs charge;
+
+    if (!rd || !rd->accounted)
+        return ifr;
+
+    charge.scalar = 0;
+    charge.count = 1;
+    charge.total_pred_lat = rd->accounted_pred_lat;
+
+    rd->accounted = false;
+    ifr.scalar = atomic64_sub_return(charge.scalar,
+                                    &ad->in_flight_rqs.atomic);
+    return ifr;
+}
+
 static void insert_to_prio_queue(struct adios_data *ad,
 		struct request *rq, bool pq_idx) {
 	struct adios_rq_data *rd = get_rq_data(rq);
 	unsigned long flags;
 
-	/* We're sure that rd->managed == true */
-	union adios_in_flight_rqs ifr = {
-		.count          = 1,
-		.total_pred_lat = rd->pred_lat,
-	};
-	atomic64_add(ifr.scalar, &ad->in_flight_rqs.atomic);
+	adios_charge_request(ad, rd);
 
 	spin_lock_irqsave(&ad->pq_lock, flags);
 	{
@@ -1147,6 +1181,7 @@ static bool fill_batch_queues(struct adios_data *ad, u64 tpl) {
 			optype : !!(rd->deadline != rq->start_time_ns);
 		dest_q = &ad->batch_queue[page][dest_idx];
 		list_add_tail(&rq->queuelist, dest_q);
+		adios_charge_request(ad, rd);
 		ad->bq_state[page] |= 1U << dest_idx;
 		ad->batch_count[page][optype]++;
 		optype_count[optype]++;
@@ -1160,13 +1195,6 @@ static bool fill_batch_queues(struct adios_data *ad, u64 tpl) {
 			list_sort(NULL, &ad->batch_queue[page][1], cmp_rq_pos);
 
 	if (count) {
-		/* We're sure that every request's rd->managed == true */
-		union adios_in_flight_rqs ifr = {
-			.count          = count,
-			.total_pred_lat = added_lat,
-		};
-		atomic64_add(ifr.scalar, &ad->in_flight_rqs.atomic);
-
 		set_adios_state(ad, ADIOS_STATE_BQ, page, true);
 
 		for (optype = 0; optype < ADIOS_OPTYPES; optype++)
@@ -1342,16 +1370,8 @@ static void update_timer_callback(struct timer_list *t) {
 static void adios_completed_request(struct request *rq, u64 now) {
 	struct adios_data *ad = rq->q->elevator->elevator_data;
 	struct adios_rq_data *rd = get_rq_data(rq);
-	union adios_in_flight_rqs ifr = { .scalar = 0 };
-
-	if (rd->managed) {
-		union adios_in_flight_rqs ifr_to_sub = {
-			.count          = 1,
-			.total_pred_lat = rd->pred_lat,
-		};
-		ifr.scalar = atomic64_sub_return(
-			ifr_to_sub.scalar, &ad->in_flight_rqs.atomic);
-	}
+	union adios_in_flight_rqs ifr =
+		adios_uncharge_request(ad, rd);
 	u8 optype = adios_optype(rq);
 
 	unsigned long flags;
@@ -1408,6 +1428,7 @@ static void adios_finish_request(struct request *rq) {
 	struct adios_data *ad = rq->q->elevator->elevator_data;
 
 	if (rq->elv.priv[0]) {
+		adios_uncharge_request(ad, get_rq_data(rq));
 		// Free adios_rq_data back to the memory pool
 		mempool_free(get_rq_data(rq), ad->rq_data_pool);
 		rq->elv.priv[0] = NULL;
