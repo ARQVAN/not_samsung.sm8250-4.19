@@ -177,7 +177,9 @@ sugov_apply_response_time(unsigned long util, int cpu)
 
 	mult = per_cpu(response_time_mult, cpu) * util;
 
-	return mult >> SCHED_CAPACITY_SHIFT;
+	return min_t(unsigned long,
+		     mult >> SCHED_CAPACITY_SHIFT,
+		     SCHED_CAPACITY_SCALE);
 }
 
 static bool sugov_should_update_freq(struct sugov_policy *sg_policy, u64 time)
