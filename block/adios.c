@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/rbtree.h>
 #include <linux/sbitmap.h>
+#include <linux/smp.h>
 #include <linux/mempool.h>
 #include <linux/slab.h>
 #include <linux/timekeeping.h>
@@ -615,7 +616,7 @@ static void latency_model_input(struct adios_data *ad,
 	struct latency_model_params *params;
 
 	local_irq_save(flags);
-	buckets = per_cpu_ptr(model->pcpu_buckets, __smp_processor_id());
+	buckets = per_cpu_ptr(model->pcpu_buckets, raw_smp_processor_id());
 
 	rcu_read_lock();
 	params = rcu_dereference(model->params);
@@ -1025,7 +1026,7 @@ static struct adios_rq_data *get_dl_first_rd(struct adios_data *ad, bool idx) {
 
 // Comparison function for sorting requests by block address
 static int cmp_rq_pos(void *priv,
-		const struct list_head *a, const struct list_head *b) {
+		struct list_head *a, struct list_head *b) {
 	struct request *rq_a = list_entry(a, struct request, queuelist);
 	struct request *rq_b = list_entry(b, struct request, queuelist);
 	u64 pos_a = blk_rq_pos(rq_a);
