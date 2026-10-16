@@ -6649,8 +6649,7 @@ restart:
 
 	if (!sc.nr_reclaimed) {
 		count_vm_event(LRU_KSWAPD_NO_PROGRESS);
-		if (!lru_gen_enabled())
-			pgdat->kswapd_failures++;
+		pgdat->kswapd_failures++;
 	}
 
 out:
