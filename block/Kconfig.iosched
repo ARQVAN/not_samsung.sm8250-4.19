@@ -3,6 +3,13 @@ if BLOCK
 
 menu "IO Schedulers"
 
+config MQ_IOSCHED_ADIOS
+	tristate "ADIOS adaptive deadline I/O scheduler"
+	default n
+	help
+	  Adaptive Deadline I/O Scheduler with latency modeling
+	  and request batching.
+
 config MQ_IOSCHED_DEADLINE
 	tristate "MQ deadline I/O scheduler"
 	default n
