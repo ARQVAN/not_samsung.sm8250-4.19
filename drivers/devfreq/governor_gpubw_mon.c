@@ -116,8 +116,14 @@ static u32 generate_hint(struct devfreq_msm_adreno_tz_data *priv, int level,
 			(unsigned int) priv->bus.total_time;
 	norm_cycles = (unsigned int)(priv->bus.ram_time + priv->bus.ram_wait) /
 			(unsigned int) priv->bus.total_time;
-	wait_active_percent = (100 * (unsigned int)priv->bus.ram_wait) /
-			(unsigned int) priv->bus.ram_time;
+	if (priv->bus.ram_wait == 0)
+		wait_active_percent = 0;
+	else if (priv->bus.ram_time == 0)
+		wait_active_percent = 100;
+	else
+		wait_active_percent =
+			(100 * (unsigned int)priv->bus.ram_wait) /
+			(unsigned int)priv->bus.ram_time;
 	gpu_percent = (100 * (unsigned int)priv->bus.gpu_time) /
 			(unsigned int) priv->bus.total_time;
 
