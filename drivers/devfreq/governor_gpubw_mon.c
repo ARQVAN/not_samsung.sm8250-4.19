@@ -201,6 +201,9 @@ static int devfreq_gpubw_get_target(struct devfreq *df,
 	if (priv->bus.total_time < bus_profile->sampling_ms)
 		return result;
 
+	if (level < 0)
+		return level;
+
 	bus_profile->flag = generate_hint(priv, priv->bus.index[level], *freq,
 			b.gpu_minfreq);
 
