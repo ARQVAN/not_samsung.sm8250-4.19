@@ -17,7 +17,7 @@
 #define LONG_FLOOR              20000
 #define HIST                    5
 #define TARGET                  80
-#define CAP                     75
+#define CAP                     65
 #define WAIT_THRESHOLD          10
 /* AB vote is in multiple of BW_STEP Mega bytes */
 #define BW_STEP                 50
