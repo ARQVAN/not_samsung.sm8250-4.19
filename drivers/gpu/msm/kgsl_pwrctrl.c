@@ -760,6 +760,15 @@ static ssize_t thermal_pwrlevel_store(struct device *dev,
 	if (level > pwr->num_pwrlevels - 2)
 		level = pwr->num_pwrlevels - 2;
 
+	/*
+	 * Allow one additional GPU performance level for moderate
+	 * sysfs thermal requests. Keep severe limits unchanged.
+	 *
+	 * Devfreq cooling and CX-Ipeak use independent limit clients.
+	 */
+	if (level >= 2 && level <= 3)
+		level--;
+
 	if (kgsl_pwr_limits_set_freq(pwr->sysfs_pwr_limit,
 			pwr->pwrlevels[level].gpu_freq)) {
 		dev_err(device->dev,
