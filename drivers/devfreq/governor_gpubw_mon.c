@@ -14,7 +14,7 @@
 #include "governor.h"
 
 #define MIN_BUSY                1000
-#define LONG_FLOOR              50000
+#define LONG_FLOOR              20000
 #define HIST                    5
 #define TARGET                  80
 #define CAP                     75
