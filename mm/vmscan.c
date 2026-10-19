@@ -1211,7 +1211,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		if (pgdat)
 			VM_BUG_ON_PAGE(page_pgdat(page) != pgdat, page);
 
-		nr_pages = 1 << compound_order(page);
+		nr_pages = compound_nr(page);
 
 		/* Account for all base pages in a compound page. */
 		sc->nr_scanned += nr_pages;
@@ -1853,7 +1853,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 
 		VM_BUG_ON_PAGE(!PageLRU(page), page);
 
-		nr_pages = 1 << compound_order(page);
+		nr_pages = compound_nr(page);
 		total_scan += nr_pages;
 
 #ifdef CONFIG_HUGEPAGE_POOL
