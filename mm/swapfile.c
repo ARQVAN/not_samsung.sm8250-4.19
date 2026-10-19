@@ -152,6 +152,18 @@ static int __try_to_reclaim_swap(struct swap_info_struct *si,
 	return ret;
 }
 
+static inline struct swap_extent *first_se(struct swap_info_struct *sis)
+{
+	struct rb_node *rb = rb_first(&sis->swap_extent_root);
+	return rb_entry(rb, struct swap_extent, rb_node);
+}
+
+static inline struct swap_extent *next_se(struct swap_extent *se)
+{
+	struct rb_node *rb = rb_next(&se->rb_node);
+	return rb ? rb_entry(rb, struct swap_extent, rb_node) : NULL;
+}
+
 /*
  * swapon tell device that all the old swap contents can be discarded,
  * to allow the swap device to optimize its wear-levelling.
@@ -164,7 +176,7 @@ static int discard_swap(struct swap_info_struct *si)
 	int err = 0;
 
 	/* Do not discard the swap header page! */
-	se = &si->first_swap_extent;
+	se = first_se(si);
 	start_block = (se->start_block + 1) << (PAGE_SHIFT - 9);
 	nr_blocks = ((sector_t)se->nr_pages - 1) << (PAGE_SHIFT - 9);
 	if (nr_blocks) {
@@ -175,7 +187,7 @@ static int discard_swap(struct swap_info_struct *si)
 		cond_resched();
 	}
 
-	list_for_each_entry(se, &si->first_swap_extent.list, list) {
+	for (se = next_se(se); se; se = next_se(se)) {
 		start_block = se->start_block << (PAGE_SHIFT - 9);
 		nr_blocks = (sector_t)se->nr_pages << (PAGE_SHIFT - 9);
 
@@ -189,6 +201,26 @@ static int discard_swap(struct swap_info_struct *si)
 	return err;		/* That will often be -EOPNOTSUPP */
 }
 
+static struct swap_extent *
+offset_to_swap_extent(struct swap_info_struct *sis, unsigned long offset)
+{
+	struct swap_extent *se;
+	struct rb_node *rb;
+
+	rb = sis->swap_extent_root.rb_node;
+	while (rb) {
+		se = rb_entry(rb, struct swap_extent, rb_node);
+		if (offset < se->start_page)
+			rb = rb->rb_left;
+		else if (offset >= se->start_page + se->nr_pages)
+			rb = rb->rb_right;
+		else
+			return se;
+	}
+	/* It *must* be present */
+	BUG();
+}
+
 /*
  * swap allocation tell device that a cluster of swap can now be discarded,
  * to allow the swap device to optimize its wear-levelling.
@@ -196,32 +228,25 @@ static int discard_swap(struct swap_info_struct *si)
 static void discard_swap_cluster(struct swap_info_struct *si,
 				 pgoff_t start_page, pgoff_t nr_pages)
 {
-	struct swap_extent *se = si->curr_swap_extent;
-	int found_extent = 0;
+	struct swap_extent *se = offset_to_swap_extent(si, start_page);
 
 	while (nr_pages) {
-		if (se->start_page <= start_page &&
-		    start_page < se->start_page + se->nr_pages) {
-			pgoff_t offset = start_page - se->start_page;
-			sector_t start_block = se->start_block + offset;
-			sector_t nr_blocks = se->nr_pages - offset;
+		pgoff_t offset = start_page - se->start_page;
+		sector_t start_block = se->start_block + offset;
+		sector_t nr_blocks = se->nr_pages - offset;
 
-			if (nr_blocks > nr_pages)
-				nr_blocks = nr_pages;
-			start_page += nr_blocks;
-			nr_pages -= nr_blocks;
+		if (nr_blocks > nr_pages)
+			nr_blocks = nr_pages;
+		start_page += nr_blocks;
+		nr_pages -= nr_blocks;
 
-			if (!found_extent++)
-				si->curr_swap_extent = se;
+		start_block <<= PAGE_SHIFT - 9;
+		nr_blocks <<= PAGE_SHIFT - 9;
+		if (blkdev_issue_discard(si->bdev, start_block,
+					nr_blocks, GFP_NOIO, 0))
+			break;
 
-			start_block <<= PAGE_SHIFT - 9;
-			nr_blocks <<= PAGE_SHIFT - 9;
-			if (blkdev_issue_discard(si->bdev, start_block,
-				    nr_blocks, GFP_NOIO, 0))
-				break;
-		}
-
-		se = list_next_entry(se, list);
+		se = next_se(se);
 	}
 }
 
@@ -1711,7 +1736,7 @@ int swap_type_of(dev_t device, sector_t offset, struct block_device **bdev_p)
 			return type;
 		}
 		if (bdev == sis->bdev) {
-			struct swap_extent *se = &sis->first_swap_extent;
+			struct swap_extent *se = first_se(sis);
 
 			if (se->start_block == offset) {
 				if (bdev_p)
@@ -2295,7 +2320,6 @@ static void drain_mmlist(void)
 static sector_t map_swap_entry(swp_entry_t entry, struct block_device **bdev)
 {
 	struct swap_info_struct *sis;
-	struct swap_extent *start_se;
 	struct swap_extent *se;
 	pgoff_t offset;
 
@@ -2303,18 +2327,8 @@ static sector_t map_swap_entry(swp_entry_t entry, struct block_device **bdev)
 	*bdev = sis->bdev;
 
 	offset = swp_offset(entry);
-	start_se = sis->curr_swap_extent;
-	se = start_se;
-
-	for ( ; ; ) {
-		if (se->start_page <= offset &&
-				offset < (se->start_page + se->nr_pages)) {
-			return se->start_block + (offset - se->start_page);
-		}
-		se = list_next_entry(se, list);
-		sis->curr_swap_extent = se;
-		BUG_ON(se == start_se);		/* It *must* be present */
-	}
+	se = offset_to_swap_extent(sis, offset);
+	return se->start_block + (offset - se->start_page);
 }
 
 /*
@@ -2332,12 +2346,11 @@ sector_t map_swap_page(struct page *page, struct block_device **bdev)
  */
 static void destroy_swap_extents(struct swap_info_struct *sis)
 {
-	while (!list_empty(&sis->first_swap_extent.list)) {
-		struct swap_extent *se;
+	while (!RB_EMPTY_ROOT(&sis->swap_extent_root)) {
+		struct rb_node *rb = sis->swap_extent_root.rb_node;
+		struct swap_extent *se = rb_entry(rb, struct swap_extent, rb_node);
 
-		se = list_first_entry(&sis->first_swap_extent.list,
-				struct swap_extent, list);
-		list_del(&se->list);
+		rb_erase(rb, &sis->swap_extent_root);
 		kfree(se);
 	}
 
@@ -2352,7 +2365,7 @@ static void destroy_swap_extents(struct swap_info_struct *sis)
 
 /*
  * Add a block range (and the corresponding page range) into this swapdev's
- * extent list.  The extent list is kept sorted in page order.
+ * extent tree.
  *
  * This function rather assumes that it is called in ascending page order.
  */
@@ -2360,20 +2373,21 @@ int
 add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
 		unsigned long nr_pages, sector_t start_block)
 {
+	struct rb_node **link = &sis->swap_extent_root.rb_node, *parent = NULL;
 	struct swap_extent *se;
 	struct swap_extent *new_se;
-	struct list_head *lh;
 
-	if (start_page == 0) {
-		se = &sis->first_swap_extent;
-		sis->curr_swap_extent = se;
-		se->start_page = 0;
-		se->nr_pages = nr_pages;
-		se->start_block = start_block;
-		return 1;
-	} else {
-		lh = sis->first_swap_extent.list.prev;	/* Highest extent */
-		se = list_entry(lh, struct swap_extent, list);
+	/*
+	 * place the new node at the right most since the
+	 * function is called in ascending page order.
+	 */
+	while (*link) {
+		parent = *link;
+		link = &parent->rb_right;
+	}
+
+	if (parent) {
+		se = rb_entry(parent, struct swap_extent, rb_node);
 		BUG_ON(se->start_page + se->nr_pages != start_page);
 		if (se->start_block + se->nr_pages == start_block) {
 			/* Merge it */
@@ -2382,9 +2396,7 @@ add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
 		}
 	}
 
-	/*
-	 * No merge.  Insert a new extent, preserving ordering.
-	 */
+	/* No merge, insert a new extent. */
 	new_se = kmalloc(sizeof(*se), GFP_KERNEL);
 	if (new_se == NULL)
 		return -ENOMEM;
@@ -2392,14 +2404,15 @@ add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
 	new_se->nr_pages = nr_pages;
 	new_se->start_block = start_block;
 
-	list_add_tail(&new_se->list, &sis->first_swap_extent.list);
+	rb_link_node(&new_se->rb_node, parent, link);
+	rb_insert_color(&new_se->rb_node, &sis->swap_extent_root);
 	return 1;
 }
 EXPORT_SYMBOL_GPL(add_swap_extent);
 
 /*
  * A `swap extent' is a simple thing which maps a contiguous range of pages
- * onto a contiguous range of disk blocks.  An ordered list of swap extents
+ * onto a contiguous range of disk blocks.  An ordered tree of swap extents
  * is built at swapon time and is then used at swap_writepage/swap_readpage
  * time for locating where on disk a page belongs.
  *
@@ -2408,11 +2421,11 @@ EXPORT_SYMBOL_GPL(add_swap_extent);
  * swap files identically.
  *
  * Whether the swapdev is an S_ISREG file or an S_ISBLK blockdev, the swap
- * extent list operates in PAGE_SIZE disk blocks.  Both S_ISREG and S_ISBLK
+ * extent tree operates in PAGE_SIZE disk blocks.  Both S_ISREG and S_ISBLK
  * swapfiles are handled *identically* after swapon time.
  *
  * For S_ISREG swapfiles, setup_swap_extents() will walk all the file's blocks
- * and will parse them into an ordered extent list, in PAGE_SIZE chunks.  If
+ * and will parse them into an ordered extent tree, in PAGE_SIZE chunks.  If
  * some stray blocks are found which do not fall within the PAGE_SIZE alignment
  * requirements, they are simply tossed out - we will never use those blocks
  * for swapping.
@@ -2421,11 +2434,9 @@ EXPORT_SYMBOL_GPL(add_swap_extent);
  * prevents users from writing to the swap device, which will corrupt memory.
  *
  * The amount of disk space which a single swap extent represents varies.
- * Typically it is in the 1-4 megabyte range.  So we can have hundreds of
- * extents in the list.  To avoid much list walking, we cache the previous
- * search location in `curr_swap_extent', and start new searches from there.
- * This is extremely effective.  The average number of iterations in
- * map_swap_page() has been measured at about 0.3 per page.  - akpm.
+ * Typically it is in the 1-4 megabyte range, but fragmented swapfiles can
+ * have many more extents.  The rbtree bounds lookup cost without a shared
+ * search-position cache.
  */
 static int setup_swap_extents(struct swap_info_struct *sis, sector_t *span)
 {
@@ -2882,7 +2893,7 @@ static struct swap_info_struct *alloc_swap_info(void)
 		 * would be relying on p->type to remain valid.
 		 */
 	}
-	INIT_LIST_HEAD(&p->first_swap_extent.list);
+	p->swap_extent_root = RB_ROOT;
 	plist_node_init(&p->list, 0);
 	for_each_node(i)
 		plist_node_init(&p->avail_lists[i], 0);
