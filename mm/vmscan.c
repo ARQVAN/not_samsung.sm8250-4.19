@@ -1182,6 +1182,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		int may_enter_fs;
 		enum page_references references = PAGEREF_RECLAIM;
 		bool dirty, writeback;
+		unsigned int nr_pages;
 
 		cond_resched();
 
@@ -1195,7 +1196,10 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		if (pgdat)
 			VM_BUG_ON_PAGE(page_pgdat(page) != pgdat, page);
 
-		sc->nr_scanned++;
+		nr_pages = 1 << compound_order(page);
+
+		/* Account for all base pages in a compound page. */
+		sc->nr_scanned += nr_pages;
 
 		if (unlikely(!page_evictable(page)))
 			goto activate_locked;
@@ -1326,7 +1330,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		case PAGEREF_ACTIVATE:
 			goto activate_locked;
 		case PAGEREF_KEEP:
-			nr_ref_keep++;
+			nr_ref_keep += nr_pages;
 			goto keep_locked;
 		case PAGEREF_RECLAIM:
 		case PAGEREF_RECLAIM_CLEAN:
@@ -1358,7 +1362,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				}
 				if (!add_to_swap(page)) {
 					if (!PageTransHuge(page))
-						goto activate_locked;
+						goto activate_locked_split;
 #ifdef CONFIG_HUGEPAGE_POOL_DEBUG
 					BUG();
 #endif
@@ -1370,7 +1374,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 					count_vm_event(THP_SWPOUT_FALLBACK);
 #endif
 					if (!add_to_swap(page))
-						goto activate_locked;
+						goto activate_locked_split;
 				}
 
 				may_enter_fs = 1;
@@ -1382,6 +1386,12 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			/* Split file THP */
 			if (split_huge_page_to_list(page, page_list))
 				goto keep_locked;
+		}
+
+		/* Do not account split-off tail pages twice. */
+		if (nr_pages > 1 && !PageTransHuge(page)) {
+			sc->nr_scanned -= nr_pages - 1;
+			nr_pages = 1;
 		}
 
 		/*
@@ -1396,9 +1406,9 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				flags |= TTU_SPLIT_HUGE_PMD;
 
 			if (!try_to_unmap(page, flags, sc->target_vma)) {
-				nr_unmap_fail++;
+				nr_unmap_fail += nr_pages;
 				if (!was_swapbacked && PageSwapBacked(page))
-					nr_lazyfree_fail++;
+					nr_lazyfree_fail += nr_pages;
 				goto activate_locked;
 			}
 		}
@@ -1504,7 +1514,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 					 * increment nr_reclaimed here (and
 					 * leave it off the LRU).
 					 */
-					nr_reclaimed++;
+					nr_reclaimed += nr_pages;
 					continue;
 				}
 			}
@@ -1526,7 +1536,12 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 
 		unlock_page(page);
 free_it:
-		nr_reclaimed++;
+		nr_reclaimed += nr_pages;
+
+		/* Account before the compound page destructor clears its state. */
+		if (!pgdat)
+			mod_node_page_state(page_pgdat(page), NR_ISOLATED_ANON +
+					    page_is_file_cache(page), -(long)nr_pages);
 
 		/*
 		 * Is there need to periodically free_page_list? It would
@@ -1537,15 +1552,14 @@ free_it:
 			(*get_compound_page_dtor(page))(page);
 		} else
 			list_add(&page->lru, &free_pages);
-		/*
-		 * If pagelist are from multiple nodes, we should decrease
-		 * NR_ISOLATED_ANON + x on freed pages in here.
-		 */
-		if (!pgdat)
-			dec_node_page_state(page, NR_ISOLATED_ANON +
-					page_is_file_cache(page));
 		continue;
 
+activate_locked_split:
+		/* A failed swap insertion may have split this THP. */
+		if (nr_pages > 1) {
+			sc->nr_scanned -= nr_pages - 1;
+			nr_pages = 1;
+		}
 activate_locked:
 		/* Not a candidate for swapping, so reclaim swap space. */
 		if (PageSwapCache(page) && (mem_cgroup_swap_full(page) ||
@@ -1554,7 +1568,7 @@ activate_locked:
 		VM_BUG_ON_PAGE(PageActive(page), page);
 		if (!PageMlocked(page)) {
 			SetPageActive(page);
-			pgactivate++;
+			pgactivate += nr_pages;
 			count_memcg_page_event(page, PGACTIVATE);
 		}
 keep_locked:
@@ -1814,16 +1828,18 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 	unsigned long scan, total_scan, nr_pages;
 	LIST_HEAD(pages_skipped);
 
+	total_scan = 0;
 	scan = 0;
-	for (total_scan = 0;
-	     scan < nr_to_scan && nr_taken < nr_to_scan && !list_empty(src);
-	     total_scan++) {
+	while (scan < nr_to_scan && !list_empty(src)) {
 		struct page *page;
 
 		page = lru_to_page(src);
 		prefetchw_prev_lru_page(page, src, flags);
 
 		VM_BUG_ON_PAGE(!PageLRU(page), page);
+
+		nr_pages = 1 << compound_order(page);
+		total_scan += nr_pages;
 
 #ifdef CONFIG_HUGEPAGE_POOL
 		if (page_zonenum(page) > sc->reclaim_idx ||
@@ -1834,7 +1850,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 				skip_cma(page, sc)) {
 #endif
 			list_move(&page->lru, &pages_skipped);
-			nr_skipped[page_zonenum(page)]++;
+			nr_skipped[page_zonenum(page)] += nr_pages;
 			continue;
 		}
 
@@ -1843,11 +1859,11 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		 * return with no isolated pages if the LRU mostly contains
 		 * ineligible pages.  This causes the VM to not reclaim any
 		 * pages, triggering a premature OOM.
+		 * Count all THP tail pages when the page is eligible for isolation.
 		 */
-		scan++;
+		scan += nr_pages;
 		switch (__isolate_lru_page(page, mode)) {
 		case 0:
-			nr_pages = hpage_nr_pages(page);
 			nr_taken += nr_pages;
 			nr_zone_taken[page_zonenum(page)] += nr_pages;
 			list_move(&page->lru, dst);
