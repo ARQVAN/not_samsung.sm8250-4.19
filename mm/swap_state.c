@@ -548,7 +548,7 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	unsigned long offset = entry_offset;
 	unsigned long start_offset, end_offset;
 	unsigned long mask;
-	struct swap_info_struct *si = swp_swap_info(entry);
+	struct swap_info_struct *si;
 	struct blk_plug plug;
 	bool do_poll = true, page_allocated;
 	struct vm_area_struct *vma = vmf->vma;
@@ -558,6 +558,19 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	if (!mask)
 		goto skip;
 
+	/* Keep swap_file and the range limit valid while checking congestion. */
+	si = get_swap_device(entry);
+	if (!si)
+		return NULL;
+	if (likely(si->flags & (SWP_BLKDEV | SWP_FS))) {
+		struct inode *inode = si->swap_file->f_mapping->host;
+
+		if (inode_read_congested(inode)) {
+			put_swap_device(si);
+			goto skip;
+		}
+	}
+
 	do_poll = false;
 	/* Read a page_cluster sized and aligned cluster around offset. */
 	start_offset = offset & ~mask;
@@ -566,6 +579,7 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 		start_offset++;
 	if (end_offset >= si->max)
 		end_offset = si->max - 1;
+	put_swap_device(si);
 
 	blk_start_plug(&plug);
 	for (offset = start_offset; offset <= end_offset ; offset++) {
