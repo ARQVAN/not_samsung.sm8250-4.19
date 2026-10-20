@@ -262,10 +262,15 @@ static bool sugov_update_next_freq(struct sugov_policy *sg_policy, u64 time,
 	 * systems. A check for arch_scale_freq_invariant() is omitted here
 	 * because unconditionally rechecking the rate limit is cheaper.
 	 */
-	if (next_freq == sg_policy->next_freq ||
-	    (next_freq < sg_policy->next_freq &&
-	     sugov_should_rate_limit(sg_policy, time)))
+	if (next_freq == sg_policy->next_freq)
 		return false;
+
+	if (next_freq < sg_policy->next_freq &&
+	    sugov_should_rate_limit(sg_policy, time)) {
+		/* The raw target was resolved, but its frequency was not accepted. */
+		sg_policy->cached_raw_freq = CPUFREQ_ENTRY_INVALID;
+		return false;
+	}
 
 must_update:
 	sg_policy->next_freq = next_freq;
@@ -1117,7 +1122,7 @@ static int sugov_start(struct cpufreq_policy *policy)
 	sg_policy->next_freq			= 0;
 	sg_policy->work_in_progress		= false;
 	sg_policy->limits_changed		= false;
-	sg_policy->cached_raw_freq		= 0;
+	sg_policy->cached_raw_freq		= CPUFREQ_ENTRY_INVALID;
 
 	sg_policy->need_freq_update = cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS);
 
