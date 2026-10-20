@@ -247,7 +247,8 @@ static bool sugov_update_next_freq(struct sugov_policy *sg_policy, u64 time,
 		 * specifically wants that to happen on every update of the
 		 * policy limits.
 		 */
-		if (cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS))
+		if (next_freq != sg_policy->next_freq ||
+		    cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS))
 			goto must_update;
 	}
 
@@ -1188,6 +1189,8 @@ static void sugov_limits(struct cpufreq_policy *policy)
 	} else {
 		raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
 
+		/* Apply a changed policy limit even within the reduction delay. */
+		sg_policy->need_freq_update = true;
 		now = ktime_get_ns();
 		freq = policy->cur;
 		/*
