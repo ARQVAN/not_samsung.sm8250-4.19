@@ -169,6 +169,7 @@ static unsigned int qcom_cpufreq_hw_get(unsigned int cpu)
 {
 	struct cpufreq_policy *policy;
 	unsigned int index;
+	u32 data;
 
 	policy = cpufreq_cpu_get_raw(cpu);
 	if (!policy)
@@ -177,7 +178,13 @@ static unsigned int qcom_cpufreq_hw_get(unsigned int cpu)
 	index = readl_relaxed(policy->driver_data + offsets[REG_PERF_STATE]);
 	index = min(index, lut_max_entries - 1);
 
-	return policy->freq_table[index].frequency;
+	/* Firmware may select a row excluded from the software table. */
+	data = readl_relaxed(policy->driver_data + offsets[REG_FREQ_LUT] +
+			     index * lut_row_size);
+	if (FIELD_GET(LUT_SRC, data))
+		return xo_rate * FIELD_GET(LUT_L_VAL, data) / 1000;
+
+	return cpu_hw_rate / 1000;
 }
 
 static unsigned int
@@ -353,8 +360,9 @@ static int qcom_cpufreq_hw_read_lut(struct platform_device *pdev,
 	struct device *dev = &pdev->dev, *cpu_dev;
 	u32 data, src, lval, i, core_count, prev_cc, prev_freq, freq, volt;
 	u32 max_cc = 0;
+	u32 max_freq = 0, max_index = 0;
 	unsigned long cpu;
-	int ret, of_len;
+	int ret, of_len = 0;
 	u32 *of_table = NULL;
 	char tbl_name[] = "qcom,cpufreq-table-##";
 
@@ -418,26 +426,28 @@ static int qcom_cpufreq_hw_read_lut(struct platform_device *pdev,
 		else
 			freq = cpu_hw_rate / 1000;
 
+		/* Repeated hardware rows terminate even a filtered-out tail. */
+		if (i > 0 && prev_freq == freq && prev_cc == core_count)
+			break;
+		prev_cc = core_count;
+		prev_freq = freq;
+
 		c->table[i].frequency = freq;
 		dev_dbg(dev, "index=%d freq=%d, core_count %d\n",
 				i, c->table[i].frequency, core_count);
 
 		if (!of_find_freq(of_table, of_len, c->table[i].frequency)) {
 			c->table[i].frequency = CPUFREQ_ENTRY_INVALID;
-		} else {
-			if (core_count != max_cc)
-				c->table[i].flags = CPUFREQ_BOOST_FREQ;
-
-			/*
-			 * Two of the same frequencies with the same core counts means
-			 * end of table.
-			 */
-			if (i > 0 && prev_freq == freq && prev_cc == core_count)
-				break;
+			continue;
 		}
 
-		prev_cc = core_count;
-		prev_freq = freq;
+		if (core_count != max_cc)
+			c->table[i].flags = CPUFREQ_BOOST_FREQ;
+
+		if (freq >= max_freq) {
+			max_freq = freq;
+			max_index = i;
+		}
 
 		if (cpu_dev)
 			dev_pm_opp_add(cpu_dev, freq * 1000, volt);
@@ -445,9 +455,16 @@ static int qcom_cpufreq_hw_read_lut(struct platform_device *pdev,
 
 	c->table[i].frequency = CPUFREQ_TABLE_END;
 
+	if (!max_freq) {
+		dev_err(dev, "Domain-%d has no supported frequencies\n",
+			domain_index);
+		ret = -EINVAL;
+		goto err_of_table;
+	}
+
 	for_each_cpu(cpu, &c->related_cpus) {
 		per_cpu(cpufreq_boost_pcpu, cpu).c = c;
-		per_cpu(cpufreq_boost_pcpu, cpu).max_index = i - 1;
+		per_cpu(cpufreq_boost_pcpu, cpu).max_index = max_index;
 	}
 
 	if (cpu_dev)
