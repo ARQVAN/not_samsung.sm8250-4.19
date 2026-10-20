@@ -291,14 +291,13 @@ static void sugov_deferred_update(struct sugov_policy *sg_policy)
  * If the utilization is frequency-invariant, choose the new frequency to be
  * proportional to it, that is
  *
- * next_freq = C * max_freq * util / max
+ * next_freq = max_freq * util / max
  *
- * Otherwise, approximate the would-be frequency-invariant utilization by
- * util_raw * (curr_freq / max_freq) which leads to
+ * Utilization already includes the response scaling and DVFS headroom from
+ * sugov_effective_cpu_perf(). Otherwise, apply a 25% margin to the current
+ * frequency so a busy CPU can request a higher performance point:
  *
- * next_freq = C * curr_freq * util_raw / max
- *
- * Take C = 1.25 for the frequency tipping point at (util / max) = 0.8.
+ * next_freq = 1.25 * curr_freq * util_raw / max
  *
  * The lowest driver-supported frequency which is equal or greater than the raw
  * next_freq (as calculated above) is returned, subject to policy min/max and
@@ -308,8 +307,7 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 				  unsigned long util, unsigned long max)
 {
 	struct cpufreq_policy *policy = sg_policy->policy;
-	unsigned int freq, idx, l_freq, h_freq;
-	unsigned long next_freq = 0;
+	unsigned int freq;
 
 	if (arch_scale_freq_invariant())
 		freq = policy->cpuinfo.max_freq;
@@ -320,30 +318,13 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 		 */
 		freq = policy->cur + (policy->cur >> 2);
 
-	if (next_freq)
-		freq = next_freq;
-	else
-		freq = map_util_freq(util, freq, max);
+	freq = map_util_freq(util, freq, max);
 
 	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
 		return sg_policy->next_freq;
 
 	sg_policy->cached_raw_freq = freq;
-	l_freq = cpufreq_driver_resolve_freq(policy, freq);
-	idx = cpufreq_frequency_table_target(policy, freq, CPUFREQ_RELATION_H);
-	h_freq = policy->freq_table[idx].frequency;
-	h_freq = clamp(h_freq, policy->min, policy->max);
-	if (l_freq <= h_freq || l_freq == policy->min)
-		return l_freq;
-
-	/*
-	 * Use the frequency step below if the calculated frequency is <20%
-	 * higher than it.
-	 */
-	if (mult_frac(100, freq - h_freq, l_freq - h_freq) < 20)
-		return h_freq;
-
-	return l_freq;
+	return cpufreq_driver_resolve_freq(policy, freq);
 }
 
 /*
