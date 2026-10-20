@@ -1176,11 +1176,7 @@ static void sugov_limits(struct cpufreq_policy *policy)
 {
 	struct sugov_policy *sg_policy = policy->governor_data;
 	unsigned long flags, now;
-	unsigned int freq, max_freq = 1804800;
-
-	// little cluster max freq hardcode
-	if (policy->cpu == 0)
-		policy->max = max_freq;
+	unsigned int freq;
 
 	if (!policy->fast_switch_enabled) {
 		mutex_lock(&sg_policy->work_lock);
