@@ -139,32 +139,30 @@ static ssize_t gpu_load_show(struct device *dev,
 
 int findItem(int head, int tail, u64 refTime)
 {
-	int low = head, high = tail, middle;
-	u64 update_time;
+	int low = head, high = tail;
+	u64 left, right;
 
-	while (low < high) {
-		middle = (low + high) / 2;
-		update_time =
+	/* head and tail describe an inclusive, logically unwrapped range. */
+	if (refTime <= gpu_load_infos->gpu_load[head % NMAX].update_time)
+		return head % NMAX;
+	if (refTime >= gpu_load_infos->gpu_load[tail % NMAX].update_time)
+		return tail % NMAX;
+
+	while (low + 1 < high) {
+		int middle = low + (high - low) / 2;
+		u64 update_time =
 			gpu_load_infos->gpu_load[middle % NMAX].update_time;
 
 		if (update_time <= refTime)
-			low = middle + 1;
-		else if (update_time > refTime)
-			high = middle - 1;
+			low = middle;
+		else
+			high = middle;
 	}
 
-	update_time = gpu_load_infos->gpu_load[low % NMAX].update_time;
-	if (update_time > refTime)
-		low = low - 1;
+	left = gpu_load_infos->gpu_load[low % NMAX].update_time;
+	right = gpu_load_infos->gpu_load[high % NMAX].update_time;
 
-	if (low < tail) {
-		u64 l = gpu_load_infos->gpu_load[low % NMAX].update_time;
-		u64 r = gpu_load_infos->gpu_load[(low+1) % NMAX].update_time;
-
-		if (r - refTime < refTime - l)
-			low = low + 1;
-	}
-	return low % NMAX;
+	return (refTime - left <= right - refTime ? low : high) % NMAX;
 }
 
 unsigned long cal_gpu_load(u64 current_time, u64 update_time,
@@ -173,6 +171,10 @@ unsigned long cal_gpu_load(u64 current_time, u64 update_time,
 	unsigned long sysfs_busy_perc;
 	unsigned long tmp_act_relative_busy, tmp_act_total;
 	int tail = gpu_load_infos->tail, head = gpu_load_infos->head;
+	int last = (tail + NMAX - 1) % NMAX;
+
+	if (tail == head)
+		return 0;
 
 	if (current_time - update_time > minutes * USEC_PER_MINUTE) {
 		sysfs_busy_perc = 0;
@@ -189,11 +191,14 @@ unsigned long cal_gpu_load(u64 current_time, u64 update_time,
 		}
 
 		tmp_act_relative_busy =
-			gpu_load_infos->gpu_load[tail-1].busy_time -
+			gpu_load_infos->gpu_load[last].busy_time -
 			gpu_load_infos->gpu_load[tmpIndex].busy_time;
 
 		tmp_act_total = current_time -
 			gpu_load_infos->gpu_load[tmpIndex].update_time;
+
+		if (!tmp_act_total)
+			return 0;
 
 		sysfs_busy_perc = (tmp_act_relative_busy * 100 * 10) /
 			tmp_act_total;
@@ -217,13 +222,14 @@ static ssize_t gpu_period_load_show(struct device *dev,
 			char *buf)
 {
 	unsigned long sysfs_busy_perc[3];
-	int tail, head;
+	int tail, head, last;
 	char load[3][6] = {"0", "0", "0"};
 	int i;
 	unsigned int size;
 	spin_lock(&sample_load_lock);
 	tail = gpu_load_infos->tail;
 	head = gpu_load_infos->head;
+	last = (tail + NMAX - 1) % NMAX;
 
 	if (tail == head) {
 		sysfs_busy_perc[0] = 0;
@@ -231,7 +237,7 @@ static ssize_t gpu_period_load_show(struct device *dev,
 		sysfs_busy_perc[2] = 0;
 	} else {
 		u64 current_time = (u64)ktime_to_us(ktime_get());
-		u64 update_time = gpu_load_infos->gpu_load[tail-1].update_time;
+		u64 update_time = gpu_load_infos->gpu_load[last].update_time;
 		u64 begin_time = gpu_load_infos->gpu_load[head].update_time;
 
 		sysfs_busy_perc[0] = cal_gpu_load(current_time,
