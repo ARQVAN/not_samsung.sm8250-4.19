@@ -1069,7 +1069,7 @@ static int sugov_init(struct cpufreq_policy *policy)
 	else if (policy->cpu == 4)
 		tunables->response_time_ms = 20;
 	else if (policy->cpu == 7)
-		tunables->response_time_ms = 25;
+		tunables->response_time_ms = 16;
 	else
 		tunables->response_time_ms = sugov_calc_freq_response_ms(sg_policy);
 
