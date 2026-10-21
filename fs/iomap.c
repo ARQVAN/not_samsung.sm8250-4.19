@@ -1526,6 +1526,8 @@ static ssize_t iomap_dio_complete(struct iomap_dio *dio)
 			dio_warn_stale_pagecache(iocb->ki_filp);
 	}
 
+	inode_dio_end(inode);
+
 	/*
 	 * If this is a DSYNC write, make sure we push it to stable storage now
 	 * that we've written data.
@@ -1533,7 +1535,6 @@ static ssize_t iomap_dio_complete(struct iomap_dio *dio)
 	if (ret > 0 && (dio->flags & IOMAP_DIO_NEED_SYNC))
 		ret = generic_write_sync(iocb, ret);
 
-	inode_dio_end(file_inode(iocb->ki_filp));
 	kfree(dio);
 
 	return ret;
