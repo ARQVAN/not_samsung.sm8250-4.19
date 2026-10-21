@@ -393,7 +393,6 @@ xfs_dio_write_end_io(
 	struct inode		*inode = file_inode(iocb->ki_filp);
 	struct xfs_inode	*ip = XFS_I(inode);
 	loff_t			offset = iocb->ki_pos;
-	int			error = 0;
 
 	trace_xfs_end_io_direct_write(ip, offset, size);
 

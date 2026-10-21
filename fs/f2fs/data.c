@@ -748,7 +748,6 @@ int f2fs_submit_page_bio(struct f2fs_io_info *fio)
 	struct bio *bio;
 	struct page *page = fio->encrypted_page ?
 			fio->encrypted_page : fio->page;
-	struct inode *inode = fio->page->mapping->host;
 
 	if (!f2fs_is_valid_blkaddr(fio->sbi, fio->new_blkaddr,
 			fio->is_por ? META_POR : (__is_meta_io(fio) ?
@@ -777,9 +776,8 @@ int f2fs_submit_page_bio(struct f2fs_io_info *fio)
 			__read_io_type(page) : WB_DATA_TYPE(fio->page));
 
 #ifdef CONFIG_FS_HPB
-	if(is_inode_flag_set(inode, FI_HPB_INODE)) { 
+	if (is_inode_flag_set(fio->page->mapping->host, FI_HPB_INODE))
 		bio->bi_opf |= REQ_HPB_PREFER;
-	}
 #endif
 
 	__submit_bio(fio->sbi, bio, fio->type);
