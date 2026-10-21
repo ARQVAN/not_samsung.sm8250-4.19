@@ -814,6 +814,15 @@ static void remove_request(struct adios_data *ad, struct request *rq) {
 		q->last_merge = NULL;
 }
 
+/* Reserve a quarter of scheduler tags for synchronous reads, as in Kyber. */
+static unsigned int adios_async_depth(struct sbitmap *sb)
+{
+	unsigned int depth = min(1U << sb->shift, sb->depth);
+
+	/* shallow_depth is per bitmap word, not a whole-queue tag count. */
+	return max(1U, depth * 3 / 4);
+}
+
 // We limit the depth of request allocation for asynchronous and write requests
 static void adios_limit_depth(unsigned int opf, struct blk_mq_alloc_data *data) {
 	struct adios_data *ad = data->q->elevator->elevator_data;
@@ -822,10 +831,6 @@ static void adios_limit_depth(unsigned int opf, struct blk_mq_alloc_data *data) 
 	if (op_is_sync(opf) && !op_is_write(opf))
 		return;
 
-	/*
-	 * Linux 4.19 interprets shallow_depth as bits per bitmap word.
-	 * Allow the full word to preserve ADIOS's allocation policy.
-	 */
 	data->shallow_depth = ad->async_depth;
 }
 
@@ -835,7 +840,7 @@ static void adios_depth_updated(struct blk_mq_hw_ctx *hctx) {
 	struct adios_data *ad = q->elevator->elevator_data;
 	struct blk_mq_tags *tags = hctx->sched_tags;
 
-	ad->async_depth = 1U << tags->bitmap_tags.sb.shift;
+	ad->async_depth = adios_async_depth(&tags->bitmap_tags.sb);
 
 	sbitmap_queue_min_shallow_depth(&tags->bitmap_tags, ad->async_depth);
 }
@@ -1576,8 +1581,8 @@ static int adios_init_sched(struct request_queue *q, struct elevator_type *e) {
 	ad->compliance_flags = default_compliance_flags;
 
 	ad->models_stable = false;
-	ad->async_depth = 1U <<
-		q->queue_hw_ctx[0]->sched_tags->bitmap_tags.sb.shift;
+	ad->async_depth = adios_async_depth(
+		&q->queue_hw_ctx[0]->sched_tags->bitmap_tags.sb);
 
 	atomic_set(&ad->state, 0);
 
