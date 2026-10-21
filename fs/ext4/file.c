@@ -192,6 +192,27 @@ static void ext4_unwritten_wait(struct inode *inode)
  * threads are at work on the same unwritten block, they must be synchronized
  * or one thread will zero the other's data, causing corruption.
  */
+static bool
+ext4_unaligned_io(struct inode *inode, struct iov_iter *from, loff_t pos)
+{
+	struct super_block *sb = inode->i_sb;
+	unsigned long blockmask = sb->s_blocksize - 1;
+
+	if ((pos | iov_iter_alignment(from)) & blockmask)
+		return true;
+
+	return false;
+}
+
+static bool
+ext4_extending_io(struct inode *inode, loff_t offset, size_t len)
+{
+	if (offset + len > i_size_read(inode) ||
+	    offset + len > EXT4_I(inode)->i_disksize)
+		return true;
+	return false;
+}
+
 static int
 ext4_unaligned_aio(struct inode *inode, struct iov_iter *from, loff_t pos)
 {
@@ -403,107 +424,185 @@ static const struct iomap_dio_ops ext4_dio_write_ops = {
         .end_io = ext4_dio_write_end_io,
 };
 
-static ssize_t ext4_dio_write_iter(struct kiocb *iocb,
-                                   struct iov_iter *from)
+static ssize_t ext4_dio_write_checks(struct kiocb *iocb, struct iov_iter *from,
+				     bool *ilock_shared, bool *extend)
 {
-        ssize_t ret;
-        size_t count;
-        loff_t offset;
-        handle_t *handle;
-        struct inode *inode = file_inode(iocb->ki_filp);
-        bool extend = false, overwrite = false, unaligned_aio = false;
+	struct inode *inode = file_inode(iocb->ki_filp);
+	loff_t offset;
+	size_t count;
+	ssize_t ret;
 
-        if (iocb->ki_flags & IOCB_NOWAIT) {
-                if (!inode_trylock(inode))
-                        return -EAGAIN;
-        } else {
-                inode_lock(inode);
-        }
+restart:
+	ret = ext4_generic_write_checks(iocb, from);
+	if (ret <= 0)
+		goto out;
 
-        if (!ext4_dio_supported(iocb, from)) {
-                inode_unlock(inode);
-                return ext4_buffered_write_iter(iocb, from);
-        }
+	offset = iocb->ki_pos;
+	count = ret;
+	if (ext4_extending_io(inode, offset, count))
+		*extend = true;
+	/*
+	 * Determine whether the IO operation will overwrite allocated
+	 * and initialized blocks.
+	 * We need exclusive i_rwsem for changing security info
+	 * in kiocb_modified().
+	 */
+	if (*ilock_shared && (!IS_NOSEC(inode) || *extend ||
+	     !ext4_overwrite_io(inode, offset, count))) {
+		if (iocb->ki_flags & IOCB_NOWAIT) {
+			ret = -EAGAIN;
+			goto out;
+		}
+		inode_unlock_shared(inode);
+		*ilock_shared = false;
+		inode_lock(inode);
+		goto restart;
+	}
 
-        ret = ext4_write_checks(iocb, from);
-        if (ret <= 0) {
-                inode_unlock(inode);
-                return ret;
-        }
+	ret = kiocb_modified(iocb);
+	if (ret < 0)
+		goto out;
 
-        offset = iocb->ki_pos;
-        count = iov_iter_count(from);
+	return count;
+out:
+	if (*ilock_shared)
+		inode_unlock_shared(inode);
+	else
+		inode_unlock(inode);
+	return ret;
+}
 
-        if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS) &&
-            !is_sync_kiocb(iocb) &&
-            ext4_unaligned_aio(inode, from, offset)) {
-                unaligned_aio = true;
-                inode_dio_wait(inode);
-        }
+static ssize_t ext4_dio_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+	ssize_t ret;
+	handle_t *handle;
+	struct inode *inode = file_inode(iocb->ki_filp);
+	loff_t offset = iocb->ki_pos;
+	size_t count = iov_iter_count(from);
+	bool extend = false, unaligned_io = false;
+	bool ilock_shared = true;
 
-        if (!unaligned_aio &&
-            ext4_overwrite_io(inode, offset, count) &&
-            ext4_should_dioread_nolock(inode)) {
-                overwrite = true;
-                downgrade_write(&inode->i_rwsem);
-        }
+	/*
+	 * We initially start with shared inode lock unless it is
+	 * unaligned IO which needs exclusive lock anyways.
+	 */
+	if (ext4_unaligned_io(inode, from, offset)) {
+		unaligned_io = true;
+		ilock_shared = false;
+	}
+	/*
+	 * Quick check here without any i_rwsem lock to see if it is extending
+	 * IO. A more reliable check is done in ext4_dio_write_checks() with
+	 * proper locking in place.
+	 */
+	if (offset + count > i_size_read(inode))
+		ilock_shared = false;
 
-        if (offset + count > EXT4_I(inode)->i_disksize) {
-                if (iocb->ki_flags & IOCB_NOWAIT) {
-                        ret = -EAGAIN;
-                        goto out;
-                }
+	if (iocb->ki_flags & IOCB_NOWAIT) {
+		if (ilock_shared) {
+			if (!inode_trylock_shared(inode))
+				return -EAGAIN;
+		} else {
+			if (!inode_trylock(inode))
+				return -EAGAIN;
+		}
+	} else {
+		if (ilock_shared)
+			inode_lock_shared(inode);
+		else
+			inode_lock(inode);
+	}
 
-                handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
-                if (IS_ERR(handle)) {
-                        ret = PTR_ERR(handle);
-                        goto out;
-                }
+	/* Fallback to buffered I/O if the inode does not support direct I/O. */
+	if (!ext4_dio_supported(iocb, from)) {
+		if (ilock_shared)
+			inode_unlock_shared(inode);
+		else
+			inode_unlock(inode);
+		return ext4_buffered_write_iter(iocb, from);
+	}
 
-                ret = ext4_orphan_add(handle, inode);
-                if (ret) {
-                        ext4_journal_stop(handle);
-                        goto out;
-                }
+	ret = ext4_dio_write_checks(iocb, from, &ilock_shared, &extend);
+	if (ret <= 0)
+		return ret;
 
-                extend = true;
-                ext4_journal_stop(handle);
-        }
+	/* Unaligned and extending writes require synchronous completion. */
+	if ((iocb->ki_flags & IOCB_NOWAIT) && (unaligned_io || extend)) {
+		ret = -EAGAIN;
+		goto out;
+	}
 
-        ret = iomap_dio_rw(iocb, from, &ext4_iomap_ops,
-                           &ext4_dio_write_ops,
-                           is_sync_kiocb(iocb) || unaligned_aio || extend);
+	offset = iocb->ki_pos;
+	count = ret;
 
-        if (extend)
-                ret = ext4_handle_inode_extension(inode, offset, ret, count);
+	/*
+	 * Unaligned direct IO must be serialized among each other as zeroing
+	 * of partial blocks of two competing unaligned IOs can result in data
+	 * corruption.
+	 *
+	 * So we make sure we don't allow any unaligned IO in flight.
+	 * For IOs where we need not wait (like unaligned non-AIO DIO),
+	 * below inode_dio_wait() may anyway become a no-op, since we start
+	 * with exclusive lock.
+	 */
+	if (unaligned_io)
+		inode_dio_wait(inode);
+
+	if (extend) {
+		handle = ext4_journal_start(inode, EXT4_HT_INODE, 2);
+		if (IS_ERR(handle)) {
+			ret = PTR_ERR(handle);
+			goto out;
+		}
+
+		ret = ext4_orphan_add(handle, inode);
+		if (ret) {
+			ext4_journal_stop(handle);
+			goto out;
+		}
+
+		ext4_journal_stop(handle);
+	}
+
+	ret = iomap_dio_rw(iocb, from, &ext4_iomap_ops, &ext4_dio_write_ops,
+			   is_sync_kiocb(iocb) || unaligned_io || extend);
+
+	if (extend)
+		ret = ext4_handle_inode_extension(inode, offset, ret, count);
 
 out:
-        if (overwrite)
-                inode_unlock_shared(inode);
-        else
-                inode_unlock(inode);
+	if (ilock_shared)
+		inode_unlock_shared(inode);
+	else
+		inode_unlock(inode);
 
-        if (ret >= 0 && iov_iter_count(from)) {
-                ssize_t err;
-                loff_t endbyte;
+	if (ret >= 0 && iov_iter_count(from)) {
+		ssize_t err;
+		loff_t endbyte;
 
-                offset = iocb->ki_pos;
-                err = ext4_buffered_write_iter(iocb, from);
-                if (err < 0)
-                        return err;
+		offset = iocb->ki_pos;
+		err = ext4_buffered_write_iter(iocb, from);
+		if (err < 0)
+			return err;
 
-                ret += err;
-                endbyte = offset + err - 1;
-                err = filemap_write_and_wait_range(
-                        iocb->ki_filp->f_mapping, offset, endbyte);
-                if (!err)
-                        invalidate_mapping_pages(
-                                iocb->ki_filp->f_mapping,
-                                offset >> PAGE_SHIFT,
-                                endbyte >> PAGE_SHIFT);
-        }
+		/*
+		 * We need to ensure that the pages within the page cache for
+		 * the range covered by this I/O are written to disk and
+		 * invalidated. This is in attempt to preserve the expected
+		 * direct I/O semantics in the case we fallback to buffered I/O
+		 * to complete off the I/O request.
+		 */
+		ret += err;
+		endbyte = offset + err - 1;
+		err = filemap_write_and_wait_range(iocb->ki_filp->f_mapping,
+						   offset, endbyte);
+		if (!err)
+			invalidate_mapping_pages(iocb->ki_filp->f_mapping,
+						 offset >> PAGE_SHIFT,
+						 endbyte >> PAGE_SHIFT);
+	}
 
-        return ret;
+	return ret;
 }
 
 
