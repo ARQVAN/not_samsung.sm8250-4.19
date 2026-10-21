@@ -2860,19 +2860,15 @@ static void lru_gen_exit_fault(void)
 static void lru_gen_swap_refault(struct page *page, swp_entry_t entry)
 {
 	void *item;
-	struct address_space *mapping;
-	struct swap_info_struct *si;
+	struct address_space *mapping = swap_address_space(entry);
 	pgoff_t index = swp_offset(entry);
 
 	if (!lru_gen_enabled())
 		return;
 
-	si = get_swap_device(entry);
-	if (!si)
-		return;
-	mapping = swap_address_space(entry);
+	rcu_read_lock();
 	item = xa_load(&mapping->i_pages, index);
-	put_swap_device(si);
+	rcu_read_unlock();
 	if (xa_is_value(item))
 		lru_gen_refault(page, item);
 }
@@ -2948,7 +2944,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	 * and can then take the readahead path instead of SWP_SYNCHRONOUS_IO.
 	 */
 	si = swp_swap_info(entry);
-	if (si && (si->flags & SWP_SYNCHRONOUS_IO) && __swap_count(entry) == 1)
+	if (si->flags & SWP_SYNCHRONOUS_IO && __swap_count(si, entry) == 1)
 		skip_swapcache = true;
 
 	page = lookup_swap_cache(entry, vma, vmf->address);

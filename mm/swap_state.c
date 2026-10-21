@@ -75,24 +75,23 @@ unsigned long total_swapcache_pages(void)
 	unsigned int i, j, nr;
 	unsigned long ret = 0;
 	struct address_space *spaces;
-	struct swap_info_struct *si;
 
+	rcu_read_lock();
 	for (i = 0; i < MAX_SWAPFILES; i++) {
-		swp_entry_t entry = swp_entry(i, 1);
-
-		/* Avoid get_swap_device() to warn for bad swap entry */
-		if (!swp_swap_info(entry))
-			continue;
-		/* Prevent swapoff to free swapper_spaces */
-		si = get_swap_device(entry);
-		if (!si)
-			continue;
+		/*
+		 * The corresponding entries in nr_swapper_spaces and
+		 * swapper_spaces will be reused only after at least
+		 * one grace period.  So it is impossible for them
+		 * belongs to different usage.
+		 */
 		nr = nr_swapper_spaces[i];
-		spaces = swapper_spaces[i];
+		spaces = rcu_dereference(swapper_spaces[i]);
+		if (!nr || !spaces)
+			continue;
 		for (j = 0; j < nr; j++)
 			ret += spaces[j].nrpages;
-		put_swap_device(si);
 	}
+	rcu_read_unlock();
 	return ret;
 }
 
@@ -118,7 +117,7 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp)
 	struct address_space *address_space = swap_address_space(entry);
 	pgoff_t idx = swp_offset(entry);
 	XA_STATE_ORDER(xas, &address_space->i_pages, idx, compound_order(page));
-	unsigned long i, nr = compound_nr(page);
+	unsigned long i, nr = 1UL << compound_order(page);
 
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	VM_BUG_ON_PAGE(PageSwapCache(page), page);
@@ -313,13 +312,8 @@ struct page *lookup_swap_cache(swp_entry_t entry, struct vm_area_struct *vma,
 			       unsigned long addr)
 {
 	struct page *page;
-	struct swap_info_struct *si;
 
-	si = get_swap_device(entry);
-	if (!si)
-		return NULL;
 	page = find_get_page(swap_address_space(entry), swp_offset(entry));
-	put_swap_device(si);
 
 	INC_CACHE_INFO(find_total);
 	if (page) {
@@ -362,8 +356,8 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr,
 			bool *new_page_allocated)
 {
-	struct page *found_page = NULL, *new_page = NULL;
-	struct swap_info_struct *si;
+	struct page *found_page, *new_page = NULL;
+	struct address_space *swapper_space = swap_address_space(entry);
 	int err;
 
 	*new_page_allocated = false;
@@ -374,12 +368,7 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		 * called after lookup_swap_cache() failed, re-calling
 		 * that would confuse statistics.
 		 */
-		si = get_swap_device(entry);
-		if (!si)
-			break;
-		found_page = find_get_page(swap_address_space(entry),
-					   swp_offset(entry));
-		put_swap_device(si);
+		found_page = find_get_page(swapper_space, swp_offset(entry));
 		if (found_page)
 			break;
 
@@ -548,7 +537,7 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	unsigned long offset = entry_offset;
 	unsigned long start_offset, end_offset;
 	unsigned long mask;
-	struct swap_info_struct *si;
+	struct swap_info_struct *si = swp_swap_info(entry);
 	struct blk_plug plug;
 	bool do_poll = true, page_allocated;
 	struct vm_area_struct *vma = vmf->vma;
@@ -558,19 +547,6 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	if (!mask)
 		goto skip;
 
-	/* Keep swap_file and the range limit valid while checking congestion. */
-	si = get_swap_device(entry);
-	if (!si)
-		return NULL;
-	if (likely(si->flags & (SWP_BLKDEV | SWP_FS))) {
-		struct inode *inode = si->swap_file->f_mapping->host;
-
-		if (inode_read_congested(inode)) {
-			put_swap_device(si);
-			goto skip;
-		}
-	}
-
 	do_poll = false;
 	/* Read a page_cluster sized and aligned cluster around offset. */
 	start_offset = offset & ~mask;
@@ -579,7 +555,6 @@ struct page *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 		start_offset++;
 	if (end_offset >= si->max)
 		end_offset = si->max - 1;
-	put_swap_device(si);
 
 	blk_start_plug(&plug);
 	for (offset = start_offset; offset <= end_offset ; offset++) {
@@ -623,16 +598,20 @@ int init_swap_address_space(unsigned int type, unsigned long nr_pages)
 		mapping_set_no_writeback_tags(space);
 	}
 	nr_swapper_spaces[type] = nr;
-	swapper_spaces[type] = spaces;
+	rcu_assign_pointer(swapper_spaces[type], spaces);
 
 	return 0;
 }
 
 void exit_swap_address_space(unsigned int type)
 {
-	kvfree(swapper_spaces[type]);
+	struct address_space *spaces;
+
+	spaces = swapper_spaces[type];
 	nr_swapper_spaces[type] = 0;
-	swapper_spaces[type] = NULL;
+	rcu_assign_pointer(swapper_spaces[type], NULL);
+	synchronize_rcu();
+	kvfree(spaces);
 }
 
 static inline void swap_ra_clamp_pfn(struct vm_area_struct *vma,
