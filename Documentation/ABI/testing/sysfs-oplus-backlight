@@ -1,0 +1,16 @@
+What:		/sys/touchpanel/oplus_backlight
+Date:		October 2026
+Description:
+		ColorOS brightness compatibility interface, enabled by
+		CONFIG_OPLUS_BACKLIGHT_NODE. Reads report the requested brightness
+		of panel0-backlight scaled to 0..8191, not measured panel luminance.
+
+		Writes accept unsigned decimal integers, optionally followed by
+		".0" and a newline. Values above 8191 are clamped to 8191.
+		The value is scaled to the native maximum; a nonzero input maps
+		to at least one native brightness step. Zero requests zero.
+
+		Writes use the backlight core's normal update path and return
+		its error if the update fails. Reads and writes return ENODEV
+		when panel0-backlight is absent, or EINVAL for an invalid native
+		maximum. Invalid input also returns EINVAL.
