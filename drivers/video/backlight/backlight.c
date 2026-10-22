@@ -480,6 +480,28 @@ struct backlight_device *backlight_device_get_by_type(enum backlight_type type)
 }
 EXPORT_SYMBOL(backlight_device_get_by_type);
 
+static int backlight_name_match(struct device *dev, const void *data)
+{
+	return !strcmp(dev_name(dev), data);
+}
+
+/**
+ * backlight_device_get_by_name - find a backlight device by its name
+ * @name: name of the backlight device
+ *
+ * Return: the matching backlight device with a reference held, or NULL.
+ * The caller must release the reference with put_device(&bd->dev).
+ */
+struct backlight_device *backlight_device_get_by_name(const char *name)
+{
+	struct device *dev;
+
+	dev = class_find_device(backlight_class, NULL, name, backlight_name_match);
+
+	return dev ? to_backlight_device(dev) : NULL;
+}
+EXPORT_SYMBOL(backlight_device_get_by_name);
+
 /**
  * backlight_device_unregister - unregisters a backlight device object.
  * @bd: the backlight device object to be unregistered and freed.
