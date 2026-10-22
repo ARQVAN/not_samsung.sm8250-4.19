@@ -294,7 +294,8 @@ static int s3c_cpufreq_target(struct cpufreq_policy *policy,
 
 	if (ftab) {
 		index = cpufreq_frequency_table_target(policy, target_freq,
-						       relation);
+					       policy->min, policy->max,
+					       relation);
 
 		s3c_freq_dbg("%s: adjust %d to entry %d (%u)\n", __func__,
 			     target_freq, index, ftab[index].frequency);
@@ -325,7 +326,8 @@ static int s3c_cpufreq_target(struct cpufreq_policy *policy,
 		 * the table entry's index field. */
 
 		index = cpufreq_frequency_table_target(&tmp_policy, target_freq,
-						       relation);
+					       tmp_policy.min, tmp_policy.max,
+					       relation);
 		pll = pll_reg + index;
 
 		s3c_freq_dbg("%s: target %u => %u\n",

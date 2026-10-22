@@ -124,8 +124,8 @@ static inline u64 sugov_calc_freq_response_ms(struct sugov_policy *sg_policy)
 
 	max_freq = sg_policy->policy->cpuinfo.max_freq;
 	sec_max_freq = __resolve_freq(sg_policy->policy,
-				      max_freq - 1,
-				      CPUFREQ_RELATION_H);
+				      max_freq - 1, sg_policy->policy->min,
+				      sg_policy->policy->max, CPUFREQ_RELATION_H);
 
 	/*
 	 * We will request max_freq as soon as util crosses the capacity at

@@ -49,7 +49,7 @@ static int set_cpu_freq(struct cpufreq_policy *policy, unsigned int new_freq,
 
 	freqs.old = policy->cur;
 	freqs.new = new_freq;
-	freqs.cpu = policy->cpu;
+	freqs.policy = policy;
 
 	trace_cpu_frequency_switch_start(freqs.old, freqs.new, policy->cpu);
 	cpufreq_freq_transition_begin(policy, &freqs);
@@ -93,7 +93,8 @@ static int msm_cpufreq_target(struct cpufreq_policy *policy,
 		index = per_cpu(cached_resolve_idx, first_cpu);
 	else
 		index = cpufreq_frequency_table_target(policy, target_freq,
-						       relation);
+					       policy->min, policy->max,
+					       relation);
 
 	pr_debug("CPU[%d] target %d relation %d (%d-%d) selected %d\n",
 		policy->cpu, target_freq, relation,
@@ -114,6 +115,7 @@ static unsigned int msm_cpufreq_resolve_freq(struct cpufreq_policy *policy,
 	unsigned int freq;
 
 	index = cpufreq_frequency_table_target(policy, target_freq,
+					       policy->min, policy->max,
 					       CPUFREQ_RELATION_L);
 	freq = policy->freq_table[index].frequency;
 
@@ -164,7 +166,8 @@ static int msm_cpufreq_init(struct cpufreq_policy *policy)
 	cur_freq = clk_get_rate(cpu_clk[policy->cpu])/1000;
 
 	index =  cpufreq_frequency_table_target(policy, cur_freq,
-						CPUFREQ_RELATION_H);
+					       policy->min, policy->max,
+					       CPUFREQ_RELATION_H);
 	/*
 	 * Call set_cpu_freq unconditionally so that when cpu is set to
 	 * online, frequency limit will always be updated.

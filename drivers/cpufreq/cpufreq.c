@@ -516,16 +516,17 @@ void cpufreq_disable_fast_switch(struct cpufreq_policy *policy)
 EXPORT_SYMBOL_GPL(cpufreq_disable_fast_switch);
 
 unsigned int __resolve_freq(struct cpufreq_policy *policy,
-			    unsigned int target_freq, unsigned int relation)
+			    unsigned int target_freq,
+			    unsigned int min, unsigned int max, unsigned int relation)
 {
-	target_freq = clamp_val(target_freq, policy->min, policy->max);
+	target_freq = clamp_val(target_freq, min, max);
 	policy->cached_target_freq = target_freq;
 
 	if (cpufreq_driver->target_index) {
 		int idx;
 
-		idx = cpufreq_frequency_table_target(policy, target_freq,
-						     relation);
+		idx = cpufreq_frequency_table_target(policy, target_freq, min,
+						     max, relation);
 		policy->cached_resolved_idx = idx;
 		return policy->freq_table[idx].frequency;
 	}
@@ -550,7 +551,17 @@ unsigned int __resolve_freq(struct cpufreq_policy *policy,
 unsigned int cpufreq_driver_resolve_freq(struct cpufreq_policy *policy,
 					 unsigned int target_freq)
 {
-	return __resolve_freq(policy, target_freq, CPUFREQ_RELATION_L);
+	unsigned int min = READ_ONCE(policy->min);
+	unsigned int max = READ_ONCE(policy->max);
+
+	/*
+	 * Concurrent policy updates can expose limits from different updates.
+	 * Always honor the maximum, which may come from thermal throttling.
+	 */
+	if (unlikely(min > max))
+		min = max;
+
+	return __resolve_freq(policy, target_freq, min, max, CPUFREQ_RELATION_L);
 }
 EXPORT_SYMBOL_GPL(cpufreq_driver_resolve_freq);
 
@@ -2110,7 +2121,8 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 	if (cpufreq_disabled())
 		return -ENODEV;
 
-	target_freq = __resolve_freq(policy, target_freq, relation);
+	target_freq = __resolve_freq(policy, target_freq, policy->min,
+				     policy->max, relation);
 
 	pr_debug("target for CPU %u: %u kHz, relation %u, requested %u kHz\n",
 		 policy->cpu, target_freq, relation, old_target_freq);
@@ -2338,6 +2350,22 @@ int cpufreq_get_policy(struct cpufreq_policy *policy, unsigned int cpu)
 }
 EXPORT_SYMBOL(cpufreq_get_policy);
 
+/* Resolve a policy bound without disturbing a table driver's target cache. */
+static unsigned int cpufreq_resolve_limit(struct cpufreq_policy *policy,
+					unsigned int target_freq,
+					unsigned int min, unsigned int max,
+					unsigned int relation)
+{
+	int idx;
+
+	if (!policy->freq_table)
+		return __resolve_freq(policy, target_freq, min, max, relation);
+
+	idx = cpufreq_frequency_table_target(policy, target_freq, min, max,
+					    relation);
+	return policy->freq_table[idx].frequency;
+}
+
 /*
  * policy : current policy.
  * new_policy: policy to be set.
@@ -2346,6 +2374,7 @@ static int cpufreq_set_policy(struct cpufreq_policy *policy,
 				struct cpufreq_policy *new_policy)
 {
 	struct cpufreq_governor *old_gov;
+	unsigned int min, max;
 	int ret;
 
 	pr_debug("setting new policy for CPU %u: %u - %u kHz\n",
@@ -2385,8 +2414,23 @@ static int cpufreq_set_policy(struct cpufreq_policy *policy,
 	blocking_notifier_call_chain(&cpufreq_policy_notifier_list,
 			CPUFREQ_NOTIFY, new_policy);
 
-	policy->min = new_policy->min;
-	policy->max = new_policy->max;
+	/*
+	 * Resolve policy min/max to available frequencies before publishing
+	 * either value. Pass the new bounds explicitly so the old limits do
+	 * not constrain the lookup. Frequency decisions may run concurrently.
+	 *
+	 * Use the copied policy and cache-free table lookup: Qualcomm fast
+	 * switch consumes cached_resolved_idx concurrently with this update.
+	 * Resolving bounds must not overwrite the governor's target cache.
+	 */
+	max = cpufreq_resolve_limit(new_policy, new_policy->max,
+				    new_policy->min, new_policy->max,
+				    CPUFREQ_RELATION_H);
+	min = cpufreq_resolve_limit(new_policy, new_policy->min,
+				    new_policy->min, new_policy->max,
+				    CPUFREQ_RELATION_L);
+	WRITE_ONCE(policy->max, max);
+	WRITE_ONCE(policy->min, min > max ? max : min);
 	trace_cpu_frequency_limits(policy);
 	if(policy->cpu < NR_CPUS) {
 		if(/*core_min_max_policy[policy->cpu].min != policy->min ||*/ core_min_max_policy[policy->cpu].max != policy->max) {
