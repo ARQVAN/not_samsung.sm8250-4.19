@@ -81,6 +81,7 @@ static inline int erofs_getxattr(struct inode *inode, int index,
 
 #ifdef CONFIG_EROFS_FS_POSIX_ACL
 struct posix_acl *erofs_get_acl(struct inode *inode, int type);
+bool erofs_inode_has_noacl(struct inode *inode, void *kaddr, unsigned int ofs);
 #else
 #define erofs_get_acl	(NULL)
 #endif

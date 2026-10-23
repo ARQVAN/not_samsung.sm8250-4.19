@@ -4,6 +4,7 @@
  *             https://www.huawei.com/
  */
 #include <linux/security.h>
+#include <linux/overflow.h>
 #include <linux/xxhash.h>
 #include "xattr.h"
 
@@ -720,4 +721,25 @@ struct posix_acl *erofs_get_acl(struct inode *inode, int type)
 	kfree(value);
 	return acl;
 }
+
+bool erofs_inode_has_noacl(struct inode *inode, void *kaddr, unsigned int ofs)
+{
+	static const unsigned int bitmask =
+		BIT(21) |	/* system.posix_acl_default */
+		BIT(30);	/* system.posix_acl_access */
+	struct erofs_sb_info *sbi = EROFS_I_SB(inode);
+	const struct erofs_xattr_ibody_header *ih = kaddr + ofs;
+
+	if (EROFS_I(inode)->xattr_isize < sizeof(*ih))
+		return true;
+
+	if (erofs_sb_has_xattr_filter(sbi) && !sbi->xattr_filter_reserved &&
+	    !check_add_overflow(ofs, (unsigned int)sizeof(*ih), &ofs) &&
+	    ofs <= EROFS_BLKSIZ) {
+		if ((le32_to_cpu(ih->h_name_filter) & bitmask) == bitmask)
+			return true;
+	}
+	return false;
+}
+
 #endif

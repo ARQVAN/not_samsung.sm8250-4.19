@@ -169,6 +169,11 @@ static struct page *erofs_read_inode(struct inode *inode,
 		goto err_out;
 	}
 
+#ifdef CONFIG_EROFS_FS_POSIX_ACL
+	if (erofs_inode_has_noacl(inode, page_address(page), *ofs))
+		cache_no_acl(inode);
+#endif
+
 	inode->i_mtime.tv_sec = inode->i_ctime.tv_sec;
 	inode->i_atime.tv_sec = inode->i_ctime.tv_sec;
 	inode->i_mtime.tv_nsec = inode->i_ctime.tv_nsec;
