@@ -354,8 +354,6 @@ struct z_erofs_decompress_frontend {
 	struct z_erofs_collector clt;
 	struct erofs_map_blocks map;
 
-	/* used for applying cache strategy on the fly */
-	bool backmost;
 	erofs_off_t headoffset;
 };
 
@@ -364,8 +362,7 @@ struct z_erofs_decompress_frontend {
 	.mode = COLLECT_PRIMARY_FOLLOWED }
 
 #define DECOMPRESS_FRONTEND_INIT(__i) { \
-	.inode = __i, .clt = COLLECTOR_INIT(), \
-	.backmost = true, }
+	.inode = __i, .clt = COLLECTOR_INIT(), }
 
 static struct page *z_pagemap_global[Z_EROFS_VMAP_GLOBAL_PAGES];
 static DEFINE_MUTEX(z_pagemap_global_lock);
@@ -784,7 +781,7 @@ static bool should_alloc_managed_pages(struct z_erofs_decompress_frontend *fe,
 	if (cachestrategy <= EROFS_ZIP_CACHE_DISABLED)
 		return false;
 
-	if (fe->backmost)
+	if (!(fe->map.m_flags & EROFS_MAP_FULL_MAPPED))
 		return true;
 
 	return cachestrategy >= EROFS_ZIP_CACHE_READAROUND &&
@@ -826,8 +823,7 @@ repeat:
 	/* go ahead the next map_blocks */
 	erofs_dbg("%s: [out-of-range] pos %llu", __func__, offset + cur);
 
-	if (z_erofs_collector_end(clt))
-		fe->backmost = false;
+	z_erofs_collector_end(clt);
 
 	map->m_la = offset + cur;
 	map->m_llen = 0;
