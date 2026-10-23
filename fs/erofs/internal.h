@@ -297,6 +297,15 @@ static inline unsigned int erofs_inode_datalayout(unsigned int value)
 			      EROFS_I_DATALAYOUT_BITS);
 }
 
+/* Allocate speculative cache pages without waiting for reclaim or page locks. */
+static inline struct page *
+erofs_grab_cache_page_nowait(struct address_space *mapping, pgoff_t index)
+{
+	return pagecache_get_page(mapping, index,
+			FGP_LOCK | FGP_CREAT | FGP_NOFS | FGP_NOWAIT,
+			readahead_gfp_mask(mapping) & ~__GFP_RECLAIM);
+}
+
 extern const struct super_operations erofs_sops;
 
 extern const struct address_space_operations erofs_raw_access_aops;
