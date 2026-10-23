@@ -450,7 +450,7 @@ static size_t lz4p_decompress(const void *source,
 
 	/* Go fast if we can, keeping away from the end of buffers */
 	if (outputSize > LZ4_FAST_MARGIN && inputSize > LZ4_FAST_MARGIN &&
-		accel && lz4_decompress_accel_enable()) {
+		accel && lz4p_decompress_accel_enable()) {
 		ret = lz4p_decompress_asm(&dstPtr, dest,
 					dest + outputSize - LZ4_FAST_MARGIN,
 					&srcPtr,

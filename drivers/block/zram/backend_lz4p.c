@@ -63,13 +63,16 @@ static int lz4p_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
 
 	ret = LZ4P_decompress_safe(req->src, req->dst, req->src_len,
 				   req->dst_len, NULL);
-	if (ret < 0)
+	if (ret != req->dst_len)
 		return -EINVAL;
 	return 0;
 }
 
 static int lz4p_setup_params(struct zcomp_params *params)
 {
+	if (params->dict_sz || params->level != ZCOMP_PARAM_NO_LEVEL)
+		return -EINVAL;
+
 	return 0;
 }
 

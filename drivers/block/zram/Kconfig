@@ -48,7 +48,7 @@ config ZRAM_BACKEND_FORCE_LZO
 	depends on ZRAM
 	def_bool !ZRAM_BACKEND_LZ4 && !ZRAM_BACKEND_LZ4HC && \
 		!ZRAM_BACKEND_ZSTD && !ZRAM_BACKEND_DEFLATE && \
-		!ZRAM_BACKEND_842
+		!ZRAM_BACKEND_842 && !ZRAM_LZ4P
 
 config ZRAM_BACKEND_LZO
 	bool "lzo and lzo-rle compression support" if !ZRAM_BACKEND_FORCE_LZO
@@ -59,6 +59,7 @@ config ZRAM_BACKEND_LZO
 
 choice
 	prompt "Default zram compressor"
+	default ZRAM_DEF_COMP_LZ4P if ZRAM_LZ4P
 	default ZRAM_DEF_COMP_LZORLE
 	depends on ZRAM
 
@@ -144,6 +145,9 @@ config ZRAM_MULTI_COMP
 
 config ZRAM_LZ4P
 	bool "LZ4P zram compression algorithm from XRING team"
+	depends on ZRAM && ARM64 && KERNEL_MODE_NEON
+	select CRYPTO_ALGAPI
+	select CRYPTO_ACOMP2
 	default n
 	help
 	  Choose this option to enable zram lz4p.

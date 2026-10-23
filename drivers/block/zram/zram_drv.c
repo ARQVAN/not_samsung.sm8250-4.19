@@ -2854,13 +2854,13 @@ static int __init zram_init(void)
 	ret = cpuhp_setup_state_multi(CPUHP_ZCOMP_PREPARE, "block/zram:prepare",
 				      zcomp_cpu_up_prepare, zcomp_cpu_dead);
 	if (ret < 0)
-		return ret;
+		goto out_lz4p;
 
 	ret = class_register(&zram_control_class);
 	if (ret) {
 		pr_err("Unable to register zram-control class\n");
 		cpuhp_remove_multi_state(CPUHP_ZCOMP_PREPARE);
-		return ret;
+		goto out_lz4p;
 	}
 
 	zram_debugfs_create();
@@ -2869,7 +2869,9 @@ static int __init zram_init(void)
 		pr_err("Unable to get major number\n");
 		class_unregister(&zram_control_class);
 		cpuhp_remove_multi_state(CPUHP_ZCOMP_PREPARE);
-		return -EBUSY;
+		zram_debugfs_destroy();
+		ret = -EBUSY;
+		goto out_lz4p;
 	}
 
 	while (num_devices != 0) {
@@ -2885,6 +2887,10 @@ static int __init zram_init(void)
 
 out_error:
 	destroy_devices();
+out_lz4p:
+#ifdef CONFIG_ZRAM_LZ4P
+	lz4p_exit();
+#endif
 	return ret;
 }
 
