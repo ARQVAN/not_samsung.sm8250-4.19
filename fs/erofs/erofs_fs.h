@@ -11,6 +11,7 @@
 #define EROFS_SUPER_OFFSET      1024
 
 #define EROFS_FEATURE_COMPAT_SB_CHKSUM          0x00000001
+#define EROFS_FEATURE_COMPAT_XATTR_FILTER       0x00000004
 
 /*
  * Any bits that aren't in EROFS_ALL_FEATURE_INCOMPAT should
@@ -51,7 +52,9 @@ struct erofs_super_block {
 		/* customized sliding window size instead of 64k by default */
 		__le16 lz4_max_distance;
 	} __packed u1;
-	__u8 reserved2[42];
+	__u8 reserved2[18];
+	__u8 xattr_filter_reserved; /* reserved for xattr name filter */
+	__u8 reserved3[23];
 };
 
 /*
@@ -164,7 +167,7 @@ struct erofs_inode_extended {
  * for read-only fs, no need to introduce h_refcount
  */
 struct erofs_xattr_ibody_header {
-	__le32 h_reserved;
+	__le32 h_name_filter; /* bit value 1 indicates not-present */
 	__u8   h_shared_count;
 	__u8   h_reserved2[7];
 	__le32 h_shared_xattrs[0];      /* shared xattr id array */
@@ -177,6 +180,9 @@ struct erofs_xattr_ibody_header {
 #define EROFS_XATTR_INDEX_TRUSTED           4
 #define EROFS_XATTR_INDEX_LUSTRE            5
 #define EROFS_XATTR_INDEX_SECURITY          6
+
+#define EROFS_XATTR_FILTER_BITS		32
+#define EROFS_XATTR_FILTER_SEED		0x25BBE08F
 
 /* xattr entry (for both inline & shared xattrs) */
 struct erofs_xattr_entry {
@@ -341,6 +347,7 @@ enum {
 static inline void erofs_check_ondisk_layout_definitions(void)
 {
 	BUILD_BUG_ON(sizeof(struct erofs_super_block) != 128);
+	BUILD_BUG_ON(offsetof(struct erofs_super_block, xattr_filter_reserved) != 104);
 	BUILD_BUG_ON(sizeof(struct erofs_inode_compact) != 32);
 	BUILD_BUG_ON(sizeof(struct erofs_inode_extended) != 64);
 	BUILD_BUG_ON(sizeof(struct erofs_xattr_ibody_header) != 12);
