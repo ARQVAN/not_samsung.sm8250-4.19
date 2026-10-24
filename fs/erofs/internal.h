@@ -369,7 +369,7 @@ struct erofs_map_blocks {
 
 	unsigned int m_flags;
 
-	struct page *mpage;
+	struct erofs_buf buf;
 };
 
 /* Flags used by erofs_map_blocks_flatmode() */
