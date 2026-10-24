@@ -205,7 +205,11 @@ static FORCE_INLINE int __lz4_decompress_safe_partial(
 		size_t offset;
 
 		/* get literal length */
-		unsigned int const token = *ip++;
+		unsigned int token;
+
+		if (unlikely(ip >= iend))
+			goto _output_error;
+		token = *ip++;
 
 		length = token >> ML_BITS;
 
@@ -301,14 +305,8 @@ static FORCE_INLINE int __lz4_decompress_safe_partial(
 
 		if ((cpy > oend - MFLIMIT)
 			|| (ip + length > iend - (2 + 1 + LASTLITERALS))) {
-			if (cpy > oend) {
-				/*
-				 * Partial decoding :
-				 * stop in the middle of literal segment
-				 */
-				cpy = oend;
-				length = oend - op;
-			}
+			if (cpy > oend)
+				goto _output_error;
 
 			if (!trusted && ip + length > iend) {
 				/*
@@ -323,15 +321,19 @@ static FORCE_INLINE int __lz4_decompress_safe_partial(
 			ip += length;
 			op += length;
 
-			/* Necessarily EOF, due to parsing restrictions */
-			if (cpy == oend)
+			if (ip == iend)
 				break;
+			if (cpy == oend)
+				goto _output_error;
 		} else {
 			/* may overwrite up to WILDCOPYLENGTH beyond cpy */
 			LZ4H_wildCopy(op, ip, cpy);
 			ip += length;
 			op = cpy;
 		}
+
+		if (unlikely(iend - ip < 2))
+			goto _output_error;
 
 		/* get offset */
 		offset = LZ4H_readLE16(ip);
@@ -342,10 +344,15 @@ static FORCE_INLINE int __lz4_decompress_safe_partial(
 		length = token & ML_MASK;
 
 _copy_match:
+		if (unlikely(!offset || offset > (size_t)(op - dst)))
+			goto _output_error;
+
 		if (length == ML_MASK) {
 			unsigned int s;
 
 			do {
+				if (unlikely(ip >= iend))
+					goto _output_error;
 				s = *ip++;
 
 				if (!trusted && ip > iend - LASTLITERALS)
@@ -362,6 +369,9 @@ _copy_match:
 		}
 
 		length += MINMATCH;
+		if (unlikely(oend - op < LASTLITERALS ||
+			     length > (size_t)(oend - op - LASTLITERALS)))
+			goto _output_error;
 
 		/* copy match within block */
 		cpy = op + length;
