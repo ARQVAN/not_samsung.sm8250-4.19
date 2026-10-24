@@ -87,4 +87,3 @@ bool erofs_inode_has_noacl(struct inode *inode, void *kaddr, unsigned int ofs);
 #endif
 
 #endif
-
