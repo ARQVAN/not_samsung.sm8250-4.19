@@ -110,7 +110,6 @@ static int z_erofs_lz4_prepare_destpages(struct z_erofs_decompress_req *rq,
 
 		if (top) {
 			victim = availables[--top];
-			get_page(victim);
 		} else {
 			/*
 			 * Direct reclaim and I/O can deadlock from here, but

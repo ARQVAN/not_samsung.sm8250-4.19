@@ -1003,6 +1003,39 @@ static void z_erofs_decompressqueue_endio(struct bio *bio)
 	bio_put(bio);
 }
 
+/* Recycled LZ4 bounce pages may occur at several output positions. */
+static void z_erofs_recycle_output_pages(struct page **pages,
+		unsigned int nr_pages, unsigned int algorithmformat, int err,
+		struct list_head *pagepool)
+{
+	unsigned int i, j, jtop = 0;
+	struct page *page;
+
+	for (i = 0; i < nr_pages; ++i) {
+		page = pages[i];
+		if (!page)
+			continue;
+
+		DBG_BUGON(z_erofs_page_is_invalidated(page));
+		if (!z_erofs_is_shortlived_page(page)) {
+			if (err < 0)
+				SetPageError(page);
+			z_erofs_onlinepage_endio(page);
+			continue;
+		}
+		if (algorithmformat != Z_EROFS_COMPRESSION_LZ4) {
+			(void)z_erofs_put_shortlivedpage(pagepool, page);
+			continue;
+		}
+		for (j = 0; j < jtop && pages[j] != page; ++j)
+			;
+		if (j >= jtop)
+			pages[jtop++] = page;
+	}
+	while (jtop)
+		(void)z_erofs_put_shortlivedpage(pagepool, pages[--jtop]);
+}
+
 static int z_erofs_decompress_pcluster(struct super_block *sb,
 				       struct z_erofs_pcluster *pcl,
 				       struct list_head *pagepool)
@@ -1172,22 +1205,8 @@ out:
 		WRITE_ONCE(compressed_pages[i], NULL);
 	}
 
-	for (i = 0; i < nr_pages; ++i) {
-		page = pages[i];
-		if (!page)
-			continue;
-
-		DBG_BUGON(z_erofs_page_is_invalidated(page));
-
-		/* recycle all individual short-lived pages */
-		if (z_erofs_put_shortlivedpage(pagepool, page))
-			continue;
-
-		if (err < 0)
-			SetPageError(page);
-
-		z_erofs_onlinepage_endio(page);
-	}
+	z_erofs_recycle_output_pages(pages, nr_pages, pcl->algorithmformat,
+				     err, pagepool);
 
 	if (pages == z_pagemap_global)
 		mutex_unlock(&z_pagemap_global_lock);

@@ -70,14 +70,9 @@ static inline bool z_erofs_put_shortlivedpage(struct list_head *pagepool,
 	if (!z_erofs_is_shortlived_page(page))
 		return false;
 
-	/* short-lived pages should not be used by others at the same time */
-	if (page_ref_count(page) > 1) {
-		put_page(page);
-	} else {
-		/* follow the pcluster rule above. */
-		set_page_private(page, 0);
-		list_add(&page->lru, pagepool);
-	}
+	/* The decompression output recycler deduplicates reused pages. */
+	set_page_private(page, 0);
+	list_add(&page->lru, pagepool);
 	return true;
 }
 
