@@ -350,6 +350,19 @@ enum {
 /* The length of extent is full */
 #define EROFS_MAP_FULL_MAPPED	(1 << BH_FullMapped)
 
+enum erofs_kmap_type {
+	EROFS_NO_KMAP,		/* don't map the buffer */
+	EROFS_KMAP,		/* use kmap() to map the buffer */
+	EROFS_KMAP_ATOMIC,	/* use kmap_atomic() to map the buffer */
+};
+
+struct erofs_buf {
+	struct page *page;
+	void *base;
+	enum erofs_kmap_type kmap_type;
+};
+#define __EROFS_BUF_INITIALIZER	((struct erofs_buf){ .page = NULL })
+
 struct erofs_map_blocks {
 	erofs_off_t m_pa, m_la;
 	u64 m_plen, m_llen;
@@ -379,6 +392,10 @@ static inline int z_erofs_map_blocks_iter(struct inode *inode,
 #endif	/* !CONFIG_EROFS_FS_ZIP */
 
 /* data.c */
+void erofs_unmap_metabuf(struct erofs_buf *buf);
+void erofs_put_metabuf(struct erofs_buf *buf);
+void *erofs_read_metabuf(struct erofs_buf *buf, struct super_block *sb,
+			 erofs_blk_t blkaddr, enum erofs_kmap_type type);
 struct page *erofs_get_meta_page(struct super_block *sb, erofs_blk_t blkaddr);
 
 /* inode.c */
