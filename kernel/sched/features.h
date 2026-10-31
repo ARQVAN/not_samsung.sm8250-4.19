@@ -85,7 +85,7 @@
  */
 #define SCHED_FEAT_WARN_DOUBLE_CLOCK 0
 
-#if defined(CONFIG_IRQ_WORK) && defined(CONFIG_SMP) && defined(CONFIG_PREEMPT_RT)
+#if defined(CONFIG_IRQ_WORK) && defined(CONFIG_SMP)
 /*
  * In order to avoid a thundering herd attack of CPUs that are
  * lowering their priorities at the same time, and there being
@@ -99,7 +99,11 @@
  * when preemption is disabled for long periods of time. Have
  * it only default enabled for PREEMPT_RT.
  */
+#ifdef CONFIG_PREEMPT_RT
 #define SCHED_FEAT_RT_PUSH_IPI 1
+#else
+#define SCHED_FEAT_RT_PUSH_IPI 0
+#endif
 #else
 #define SCHED_FEAT_RT_PUSH_IPI 0
 #endif
